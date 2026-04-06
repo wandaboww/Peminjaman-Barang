@@ -1,0 +1,112 @@
+═══════════════════════════════════════════════════════════════
+  🚀 PORT TESTING QUICK REFERENCE
+═══════════════════════════════════════════════════════════════
+
+PORT ALLOCATION:
+  Prototype  →  Port 8000  ✅ Ready (JSON DB + Full UI)
+  Laravel    →  Port 8001  ⏳ Needs Setup (API only)
+
+═══════════════════════════════════════════════════════════════
+
+QUICKSTART:
+
+1️⃣  PROTOTYPE ONLY (Recommended - Fastest)
+    run-local-server.bat
+    Open: http://127.0.0.1:8000
+    Password: admin123
+
+2️⃣  LARAVEL ONLY (After setup)
+    composer install
+    php artisan migrate
+    run-laravel-server.bat
+    API: http://127.0.0.1:8001
+
+3️⃣  RUN BOTH (Testing comparison)
+    run-dual-servers.bat
+    Prototype: http://127.0.0.1:8000
+    Laravel:   http://127.0.0.1:8001
+
+═══════════════════════════════════════════════════════════════
+
+LAUNCHER SCRIPTS:
+
+✅ run-local-server.bat         (Prototype on 8000)
+✅ run-local-server.ps1         (PowerShell version)
+✅ run-local-server.sh          (Bash for macOS/Linux)
+✅ run-laravel-server.bat       (Laravel on 8001)
+✅ run-laravel-server.ps1       (PowerShell version)
+✅ run-dual-servers.bat         (Both simultaneously)
+
+═══════════════════════════════════════════════════════════════
+
+TEST WORKFLOWS:
+
+PROTOTYPE (Port 8000):
+  1. Add User (NIP: 19800101, Role: teacher)
+  2. Add Asset (Serial: LNV-001, Status: available)
+  3. Borrow item (should update database.json)
+  4. Try borrow again (should be blocked by blacklist)
+  5. Return item (status changes to available)
+
+LARAVEL (Port 8001):
+  1. POST /api/borrowing (create loan)
+  2. POST /api/borrowing/{id}/return (return item)
+  3. GET /api/assets (list assets)
+  4. Check API response format
+
+═══════════════════════════════════════════════════════════════
+
+TROUBLESHOOTING:
+
+Port in use?
+  → netstat -ano | findstr :8000
+  → Change PORT in script or kill process
+
+PHP not found?
+  → php -v (check installation)
+  → Add PHP to PATH
+
+Laravel won't start?
+  → composer install
+  → php artisan key:generate
+  → php artisan migrate
+
+═══════════════════════════════════════════════════════════════
+
+DATABASE:
+
+Prototype:
+  - File: database.json
+  - Format: JSON
+  - Auto-created: Yes
+  - Reset: Delete file + restart
+
+Laravel:
+  - Type: MySQL
+  - Setup: php artisan migrate
+  - Credentials: In .env
+
+═══════════════════════════════════════════════════════════════
+
+FILES CREATED:
+
+📄 PORT_TESTING_GUIDE.md          ← Full documentation
+📄 PORT_TESTING_QUICK_REF.txt     ← This file
+✅ run-laravel-server.bat          ← Laravel launcher
+✅ run-laravel-server.ps1          ← Laravel PS1 launcher
+✅ run-dual-servers.bat            ← Dual launcher
+
+═══════════════════════════════════════════════════════════════
+
+RECOMMENDED ORDER:
+
+1. Start with Prototype (8000) - Easiest
+2. Test Prototype thoroughly
+3. Setup Laravel later (8001)
+4. Run both simultaneously for comparison
+
+═══════════════════════════════════════════════════════════════
+
+For detailed guide, see: PORT_TESTING_GUIDE.md
+
+Ready to test? Start with: run-local-server.bat 🚀

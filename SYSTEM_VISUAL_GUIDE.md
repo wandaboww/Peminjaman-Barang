@@ -1,0 +1,571 @@
+# 🎨 SIM-IV System Visual Guide
+
+## System Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SIM-IV INVENTORY MANAGEMENT SYSTEM                 │
+│                                                                 │
+│  Home: http://127.0.0.1:8000                                   │
+│  Password: admin123                                             │
+│  Framework: Bootstrap 5.3.2                                    │
+│  Backend: PHP 8.3                                               │
+│  Database: JSON Files                                           │
+└─────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+        ┌───────────────────────────────────────┐
+        │   PUBLIC MODE DASHBOARD               │
+        │   (No Login Required)                 │
+        │                                       │
+        │  Navbar:                              │
+        │  [🔒 Public Mode] [Login Admin]      │
+        │                                       │
+        │  Features:                            │
+        │  ├─ Borrow Items (Peminjaman)        │
+        │  │  ├─ Enter User ID (NIP/NIS)       │
+        │  │  ├─ Enter Asset Serial            │
+        │  │  └─ Get Due Date (3d/1d)          │
+        │  │                                    │
+        │  └─ Return Items (Pengembalian)      │
+        │     ├─ Enter Asset Serial            │
+        │     ├─ Select Condition              │
+        │     └─ Confirm Return                │
+        │                                       │
+        │  Borrow Duration:                     │
+        │  - Teachers: 3 days                  │
+        │  - Students: 1 day                   │
+        │  - Blacklisted: Blocked              │
+        │                                       │
+        └───────────────────────────────────────┘
+                    │                    
+            ┌───────┴────────────┐       
+            │                    │       
+            │                    ▼       
+            │          ┌──────────────────┐
+            │          │ LOGIN FORM       │
+            │          │                  │
+            │          │ Password Input   │
+            │          │ [Login Button]   │
+            │          │                  │
+            │          │ Default: admin123
+            │          │                  │
+            │          └──────────────────┘
+            │                    │
+            │                    │ (session set)
+            │                    ▼
+            │          ┌──────────────────────────┐
+            │          │ ADMIN MODE DASHBOARD     │
+            │          │                          │
+            │          │ Navbar:                  │
+            │          │ [Logout]                 │
+            │          │                          │
+            │          │ 5 Admin Menus:           │
+            │          │ 1. Dashboard             │
+            │          │ 2. Pengembalian (Return) │
+            │          │ 3. Data Barang (Assets)  │
+            │          │ 4. Data Pengguna (Users) │
+            │          │ 5. Log & Aktivitas       │
+            │          │                          │
+            │          └──────────────────────────┘
+            │                    │
+            │         ┌──────────┼──────────┬──────────┬──────────┐
+            │         │          │          │          │          │
+            │         ▼          ▼          ▼          ▼          ▼
+            │      ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+            │      │ Return │ │ Assets │ │ Users  │ │  Logs  │ │ Manage │
+            │      │ Items  │ │ Manage │ │Manage  │ │Activity│ │Blacklist
+            │      │        │ │        │ │        │ │        │ │        │
+            │      └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
+            │
+            │ (click Back/Logout)
+            │
+            └───────────────────► PUBLIC MODE
+```
+
+---
+
+## User Roles & Access Matrix
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ROLE-BASED ACCESS CONTROL                    │
+└─────────────────────────────────────────────────────────────────┘
+
+                        │ Public  │ Teacher │ Student │ Admin
+                        │ User    │         │         │
+────────────────────────┼─────────┼─────────┼─────────┼──────────
+Borrow Items            │   ✅    │   ✅    │   ✅    │   ✅
+Return Items            │   ✅    │   ✅    │   ✅    │   ✅
+View Borrowing Status   │   ✅    │   ✅    │   ✅    │   ✅
+View Borrow Duration    │   ✅    │   ✅    │   ✅    │   ✅
+────────────────────────┼─────────┼─────────┼─────────┼──────────
+Admin Dashboard         │   ❌    │   ❌    │   ❌    │   ✅
+View All Loans          │   ❌    │   ❌    │   ❌    │   ✅
+Manage Users            │   ❌    │   ❌    │   ❌    │   ✅
+Manage Assets           │   ❌    │   ❌    │   ❌    │   ✅
+View Activity Logs      │   ❌    │   ❌    │   ❌    │   ✅
+Manage Blacklist        │   ❌    │   ❌    │   ❌    │   ✅
+Clear Logs              │   ❌    │   ❌    │   ❌    │   ✅
+────────────────────────┼─────────┼─────────┼─────────┼──────────
+
+Login Required:         │   NO    │   NO    │   NO    │  YES
+                        │         │ (Public │ (Public │ Password
+                        │         │ Mode)   │ Mode)   │ admin123
+```
+
+---
+
+## Public Mode Layout
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  SIM-IV - Sistem Inventaris Barang                             │
+├─────────────────────────────────────────────────────────────────┤
+│  [🏠] Dashboard  [🔒 Public Mode] ───────► [Login Admin]       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  📊 Dashboard Inventaris                                        │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │  🔷 PEMINJAMAN BARANG                                  │  │
+│  │  Scan dan catat peminjaman aset sekolah               │  │
+│  │                                                         │  │
+│  │  ID Peminjam:    [_______________]                    │  │
+│  │  Serial Barang:  [_______________]                    │  │
+│  │                  [Pinjam Barang]                       │  │
+│  │                                                         │  │
+│  │  Durasi Peminjaman:                                    │  │
+│  │  - Guru: 3 hari                                       │  │
+│  │  - Siswa: 1 hari                                      │  │
+│  │                                                         │  │
+│  │  Riwayat Peminjaman:                                  │  │
+│  │  [Table of borrowing history]                         │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │  🟢 PENGEMBALIAN BARANG                               │  │
+│  │  Scan dan catat pengembalian aset sekolah            │  │
+│  │                                                         │  │
+│  │  Serial Barang:  [_______________]                    │  │
+│  │  Kondisi:        [Baik ▼]                             │  │
+│  │                  [Kembalikan]                          │  │
+│  │                                                         │  │
+│  │  Kondisi Barang:                                       │  │
+│  │  - ✅ Baik (Good)                                      │  │
+│  │  - ⚠️ Kerusakan Ringan (Minor Damage)                  │  │
+│  │  - ❌ Kerusakan Berat (Major Damage)                   │  │
+│  │                                                         │  │
+│  │  Riwayat Pengembalian:                                │  │
+│  │  [Table of return history]                            │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Admin Mode Layout
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  SIM-IV - Sistem Inventaris Barang                             │
+├─────────────────────────────────────────────────────────────────┤
+│  [📊] Dashboard  [↩️] Pengembalian  [📦] Data Barang            │
+│  [👥] Data Pengguna  [📋] Log & Aktivitas            [Logout]  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ADMIN DASHBOARD                                               │
+│                                                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │ Aktif Pinjam │  │  Kembalikan  │  │  Blacklist   │         │
+│  │     25       │  │      12      │  │       3      │         │
+│  └──────────────┘  └──────────────┘  └──────────────┘         │
+│                                                                 │
+│  📊 Peminjaman Terbaru                                         │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ User    │ Asset   │ Loan Date   │ Due Date   │ Status  │  │
+│  ├─────────┼─────────┼─────────────┼────────────┼─────────┤  │
+│  │ Pak Budi│ LP-001  │ 25-12-2025  │ 28-12-2025 │ Active  │  │
+│  │ Ani     │ PRJ-001 │ 25-12-2025  │ 26-12-2025 │ Active  │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  🔷 PEMINJAMAN BARANG (Admin View)                            │
+│  Allows admin to create loans for users                       │
+│                                                                 │
+│  🟢 PENGEMBALIAN BARANG (Admin Only)                          │
+│  Process returns with full control                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Data Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         DATA FLOW                               │
+└─────────────────────────────────────────────────────────────────┘
+
+USER INPUT → VALIDATION → PROCESSING → DATABASE → ACTIVITY LOG
+
+1. BORROWING FLOW:
+   
+   Input: {user_id, asset_id}
+      ↓
+   Validate: User not borrowing, User not blacklisted, Asset available
+      ↓
+   Calculate: due_date = loan_date + (3 days if teacher, 1 day if student)
+      ↓
+   Process: Create Loan record, Update Asset status
+      ↓
+   Store: Save to database.json
+      ↓
+   Log: Record action in activity_logs.json
+      ↓
+   Response: Confirmation with due date
+
+
+2. RETURN FLOW:
+
+   Input: {asset_id, condition}
+      ↓
+   Validate: Asset exists, Loan exists, Loan is active
+      ↓
+   Process: Update Loan status, Set return_date, Update Asset status
+      ↓
+   Check: If return_date > due_date → Add to blacklist
+      ↓
+   Store: Save to database.json
+      ↓
+   Log: Record action in activity_logs.json
+      ↓
+   Response: Confirmation with condition recorded
+
+
+3. ADMIN UPDATE FLOW:
+
+   Input: Admin form submission
+      ↓
+   Validate: Admin authenticated, Data valid
+      ↓
+   Process: CRUD operation (Create/Read/Update/Delete)
+      ↓
+   Store: Save to database.json
+      ↓
+   Log: Record action in activity_logs.json
+      ↓
+   Response: Confirmation with results
+```
+
+---
+
+## Database Schema Visualization
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                      DATABASE STRUCTURE                          │
+│                      (database.json)                             │
+├──────────────────────────────────────────────────────────────────┤
+
+USERS TABLE:
+┌─────┬──────────────┬────────────┬───────┬────────────┐
+│ id  │ identity_no  │ name       │ role  │ kelas      │
+├─────┼──────────────┼────────────┼───────┼────────────┤
+│ 1   │ 19800101     │ Pak Budi   │ teach │ -          │
+│ 2   │ 2024001      │ Ani        │ stud  │ 10 PPLG 1  │
+│ 3   │ 2024002      │ Budi       │ stud  │ 10 PPLG 2  │
+└─────┴──────────────┴────────────┴───────┴────────────┘
+
+ASSETS TABLE:
+┌─────┬──────────┬────────┬────────────┬──────────────┐
+│ id  │ serial   │ brand  │ model      │ status       │
+├─────┼──────────┼────────┼────────────┼──────────────┤
+│ 1   │ LP-001   │ Dell   │ Inspiron   │ available    │
+│ 2   │ PRJ-001  │ EPSON  │ EH-TW6100  │ borrowed     │
+│ 3   │ LP-002   │ Asus   │ X452C      │ maintenance  │
+└─────┴──────────┴────────┴────────────┴──────────────┘
+
+LOANS TABLE:
+┌─────┬─────────┬──────────┬────────────┬──────────────┬──────────┐
+│ id  │ user_id │ asset_id │ loan_date  │ due_date     │ status   │
+├─────┼─────────┼──────────┼────────────┼──────────────┼──────────┤
+│ 1   │ 1       │ 1        │ 25-12-2025 │ 28-12-2025   │ active   │
+│ 2   │ 2       │ 2        │ 25-12-2025 │ 26-12-2025   │ active   │
+│ 3   │ 1       │ 1        │ 22-12-2025 │ 25-12-2025   │ overdue  │
+└─────┴─────────┴──────────┴────────────┴──────────────┴──────────┘
+
+BLACKLIST TABLE:
+┌─────────┬──────────┐
+│ user_id │ reason   │
+├─────────┼──────────┤
+│ 3       │ overdue  │
+└─────────┴──────────┘
+```
+
+---
+
+## Authentication Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   AUTHENTICATION FLOW                           │
+└─────────────────────────────────────────────────────────────────┘
+
+1. INITIAL STATE (No Login)
+   ├─ AuthManager::isLoggedIn() = FALSE
+   ├─ $_SESSION['admin_logged_in'] not set
+   └─ Navbar shows: [Public Mode] [Login Admin]
+
+2. USER CLICKS "LOGIN ADMIN"
+   └─ Redirect to: ?view=login
+      └─ Display login form with password input
+
+3. USER ENTERS PASSWORD (admin123)
+   └─ JavaScript calls: fetch('?action=login')
+      └─ POST request with {password: "admin123"}
+
+4. SERVER VALIDATES PASSWORD
+   ├─ AuthManager::login($password)
+   ├─ if ($password === 'admin123')
+   │  ├─ Set: $_SESSION['admin_logged_in'] = true
+   │  ├─ Set: $_SESSION['login_time'] = time()
+   │  ├─ Call: session_write_close() [flush immediately]
+   │  └─ Return: {success: true}
+   └─ else
+      └─ Return: {success: false, message: "Password salah"}
+
+5. JAVASCRIPT RECEIVES RESPONSE
+   ├─ If success
+   │  ├─ Show alert: "Login berhasil!"
+   │  ├─ Wait 500ms [ensure session saved]
+   │  └─ Redirect to: ?view=dashboard
+   └─ If failed
+      └─ Show error message
+
+6. LOAD DASHBOARD
+   ├─ Server checks: AuthManager::isLoggedIn()
+   ├─ if TRUE
+   │  ├─ Load admin version of dashboard
+   │  ├─ Show 5 admin menus
+   │  └─ Show "Logout" button
+   └─ if FALSE
+      └─ Load public version of dashboard
+
+7. PROTECTED PAGES
+   ├─ User tries to access: ?view=assets
+   ├─ Server checks: if (!AuthManager::isLoggedIn())
+   ├─ if NOT logged in
+   │  └─ Redirect to: ?view=dashboard
+   └─ if logged in
+      └─ Load admin assets page
+
+8. LOGOUT
+   ├─ User clicks "Logout"
+   ├─ JavaScript calls: fetch('?action=logout')
+   ├─ Server executes: session_destroy()
+   ├─ All session data cleared
+   ├─ Return: {success: true}
+   ├─ Redirect to: ?view=dashboard
+   └─ Back to public mode
+      ├─ AuthManager::isLoggedIn() = FALSE
+      └─ Navbar shows: [Public Mode] [Login Admin]
+```
+
+---
+
+## Borrowing Rules Logic
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              BORROWING ELIGIBILITY DECISION TREE                │
+└─────────────────────────────────────────────────────────────────┘
+
+User wants to borrow
+    ↓
+├─ Check: User exists?
+│  ├─ NO → Error: "User tidak ditemukan"
+│  └─ YES → Continue
+│
+├─ Check: User on blacklist?
+│  ├─ YES → Error: "Akses ditolak! Akun Anda masuk daftar hitam"
+│  └─ NO → Continue
+│
+├─ Check: User has active loan?
+│  ├─ YES → Error: "Anda sudah meminjam 1 barang (batas maksimal)"
+│  └─ NO → Continue
+│
+├─ Check: Asset exists?
+│  ├─ NO → Error: "Barang tidak ditemukan"
+│  └─ YES → Continue
+│
+├─ Check: Asset available?
+│  ├─ NO → Error: "Barang tidak tersedia (Status: [status])"
+│  └─ YES → Continue
+│
+└─ ✅ APPROVED!
+   ├─ Get user role (teacher/student)
+   ├─ Calculate due date
+   │  ├─ Teacher → +3 days
+   │  └─ Student → +1 day
+   ├─ Create loan record
+   ├─ Update asset status to "borrowed"
+   ├─ Log activity
+   └─ Show confirmation: "Peminjaman berhasil! Due date: [date]"
+```
+
+---
+
+## Status Indicators
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     STATUS INDICATORS                            │
+└──────────────────────────────────────────────────────────────────┘
+
+ASSET STATUSES:
+┌──────────────┬─────────────────────────────────────────┐
+│ available    │ ✅ Ready to borrow                      │
+├──────────────┼─────────────────────────────────────────┤
+│ borrowed     │ 🟡 Currently borrowed, not available    │
+├──────────────┼─────────────────────────────────────────┤
+│ maintenance  │ 🔧 Under maintenance, not available     │
+├──────────────┼─────────────────────────────────────────┤
+│ lost         │ ❌ Lost, not available                  │
+└──────────────┴─────────────────────────────────────────┘
+
+LOAN STATUSES:
+┌──────────────┬─────────────────────────────────────────┐
+│ active       │ 🟡 Currently borrowed                   │
+├──────────────┼─────────────────────────────────────────┤
+│ returned     │ ✅ Successfully returned                │
+├──────────────┼─────────────────────────────────────────┤
+│ overdue      │ ❌ Not returned by due date             │
+├──────────────┼─────────────────────────────────────────┤
+│ lost         │ ⚠️ Not returned, marked as lost         │
+└──────────────┴─────────────────────────────────────────┘
+
+CONDITION RATINGS:
+┌──────────────┬─────────────────────────────────────────┐
+│ good         │ ✅ Returned in good condition          │
+├──────────────┼─────────────────────────────────────────┤
+│ minor_damage │ ⚠️ Returned with minor damage          │
+├──────────────┼─────────────────────────────────────────┤
+│ major_damage │ ❌ Returned with major damage          │
+└──────────────┴─────────────────────────────────────────┘
+```
+
+---
+
+## UI Components
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    UI COMPONENTS USED                            │
+└──────────────────────────────────────────────────────────────────┘
+
+BUTTONS:
+├─ .btn-primary    → Login, Submit, Confirm (Blue)
+├─ .btn-secondary  → Cancel, Back (Gray)
+├─ .btn-danger     → Delete, Clear (Red)
+└─ .btn-success    → Approve, Complete (Green)
+
+CARDS:
+├─ .card           → Container for sections
+├─ .card-header    → Title section (Blue background)
+└─ .card-body      → Content area
+
+FORMS:
+├─ form-control    → Input fields
+├─ input-group     → Grouped inputs
+├─ form-label      → Field labels
+└─ form-check      → Checkboxes/Radios
+
+TABLES:
+├─ table           → Data tables
+├─ table-hover     → Hover effect
+├─ table-striped   → Alternate row colors
+└─ thead/tbody     → Table sections
+
+BADGES:
+├─ badge bg-primary   → Info badge
+├─ badge bg-success   → Success badge
+├─ badge bg-warning   → Warning badge
+└─ badge bg-danger    → Error badge
+
+ALERTS:
+├─ alert-success   → Success message (Green)
+├─ alert-danger    → Error message (Red)
+├─ alert-warning   → Warning message (Yellow)
+└─ alert-info      → Info message (Blue)
+```
+
+---
+
+## Color Scheme
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     COLOR PALETTE                                │
+└──────────────────────────────────────────────────────────────────┘
+
+PRIMARY: #0d6efd (Blue)
+├─ Used for: Buttons, Links, Headings, Primary actions
+
+SECONDARY: #6c757d (Gray)
+├─ Used for: Secondary buttons, Disabled elements
+
+SUCCESS: #198754 (Green)
+├─ Used for: Success messages, Approved status
+
+DANGER: #dc3545 (Red)
+├─ Used for: Error messages, Delete actions
+
+WARNING: #ffc107 (Yellow)
+├─ Used for: Warning messages, Pending status
+
+INFO: #0dcaf0 (Cyan)
+├─ Used for: Info messages, Help text
+
+LIGHT: #f8f9fa (Light Gray)
+├─ Used for: Backgrounds, Inactive elements
+
+DARK: #212529 (Dark Gray)
+├─ Used for: Text, Dark backgrounds
+```
+
+---
+
+## Responsive Design
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              RESPONSIVE BREAKPOINTS                              │
+└──────────────────────────────────────────────────────────────────┘
+
+Desktop (≥1200px):
+├─ Full width layouts
+├─ All columns visible
+├─ Horizontal navigation
+
+Tablet (768px - 1199px):
+├─ Adjusted margins
+├─ Optimized spacing
+├─ Collapsible navigation (if needed)
+
+Mobile (< 768px):
+├─ Single column layouts
+├─ Hamburger menu
+├─ Touch-friendly buttons
+├─ Stacked forms
+└─ Full-width inputs
+```
+
+---
+
+**Visual Guide Complete!**
+
+This diagram shows the complete system architecture, flows, and components.
+
+For more details, see [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) and [ARCHITECTURE.md](ARCHITECTURE.md)

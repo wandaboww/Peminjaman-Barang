@@ -1,0 +1,50 @@
+# Quick Reference: Port & Testing Configuration
+
+## 🎯 Server Details
+- **URL**: `http://127.0.0.1:8000`
+- **Port**: `8000` (configurable in launcher scripts)
+- **Status**: ✅ Running and tested
+
+## 🔐 Default Credentials
+- **Admin Password**: `admin123`
+- **Change in production**: Edit `prototype.php` line 8
+
+## 📁 Key Files
+```
+run-local-server.bat  → Windows launcher (double-click)
+run-local-server.ps1  → PowerShell launcher
+TESTING.md            → Full test scenarios & workflows
+QUICK_TEST_SETUP.md   → Quick reference guide
+.env.example          → Configuration template
+```
+
+## 🚀 Start Testing (3 Steps)
+
+### Step 1: Start Server
+**Windows**: Double-click `run-local-server.bat`  
+**Other**: Run `php -S 127.0.0.1:8000`
+
+### Step 2: Login
+Open browser → `http://127.0.0.1:8000`  
+Password: `admin123`
+
+### Step 3: Test Operations
+- ✅ Create user (NIP: 19800101)
+- ✅ Create asset (Serial: LNV-TEST-001)
+- ✅ Borrow item (should update database.json)
+- ✅ Try borrowing again (should be blocked by blacklist)
+- ✅ Return item (should update status to available)
+
+## 📊 Test Data Location
+- `database.json` - Live database
+- `activity_logs.json` - Activity trail
+- Both auto-created on first run
+
+## 🔄 Reset Data
+```powershell
+Remove-Item database.json, activity_logs.json
+# Restart server
+```
+
+## 📚 More Information
+See **TESTING.md** for detailed test cases and API examples.

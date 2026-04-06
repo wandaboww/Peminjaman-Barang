@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login Test</title>
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        .test-box { border: 1px solid #ccc; padding: 20px; margin: 10px 0; background: #f9f9f9; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        .output { border: 1px solid #ddd; padding: 10px; margin: 10px 0; background: white; font-family: monospace; white-space: pre-wrap; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>🔐 Login API Test Page</h1>
+    
+    <div class="test-box">
+        <h2>Test 1: Check Server</h2>
+        <button onclick="testServer()">Test Server Connection</button>
+        <div id="test1-output" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="test-box">
+        <h2>Test 2: Login API (Default Password)</h2>
+        <button onclick="testLogin()">Test Login with admin123</button>
+        <div id="test2-output" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="test-box">
+        <h2>Test 3: Custom Password</h2>
+        <input type="text" id="customPassword" placeholder="Enter password" value="admin123">
+        <button onclick="testLoginCustom()">Test Custom Password</button>
+        <div id="test3-output" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="test-box">
+        <h2>Browser Info</h2>
+        <div id="browser-info" class="output"></div>
+    </div>
+
+    <script>
+        function showOutput(elementId, message, isError = false) {
+            const el = document.getElementById(elementId);
+            el.innerHTML = message;
+            el.className = 'output ' + (isError ? 'error' : 'success');
+            el.style.display = 'block';
+        }
+
+        function testServer() {
+            const outputId = 'test1-output';
+            showOutput(outputId, 'Testing server...');
+            
+            fetch('http://127.0.0.1:8000/', {credentials: 'same-origin'})
+                .then(res => showOutput(outputId, '✅ Server is ONLINE (Status: ' + res.status + ')'))
+                .catch(e => showOutput(outputId, '❌ Server OFFLINE\nError: ' + e.message, true));
+        }
+
+        function testLogin() {
+            testLoginCustom('admin123');
+        }
+
+        function testLoginCustom(pwd = null) {
+            const outputId = 'test3-output';
+            const password = pwd || document.getElementById('customPassword').value;
+            
+            showOutput(outputId, 'Sending login request...');
+            
+            fetch('http://127.0.0.1:8000/?action=login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'same-origin',
+                body: JSON.stringify({password: password})
+            })
+            .then(res => {
+                console.log('Response status:', res.status);
+                return res.text().then(text => ({status: res.status, text}));
+            })
+            .then(({status, text}) => {
+                try {
+                    const data = JSON.parse(text);
+                    if (data.success) {
+                        showOutput(outputId, '✅ LOGIN SUCCESSFUL!\n\nMessage: ' + data.message);
+                    } else {
+                        showOutput(outputId, '❌ LOGIN FAILED\n\nMessage: ' + data.message, true);
+                    }
+                } catch(e) {
+                    showOutput(outputId, '❌ PARSE ERROR\n\nResponse: ' + text + '\n\nError: ' + e.message, true);
+                }
+            })
+            .catch(e => showOutput(outputId, '❌ REQUEST FAILED\n\nError: ' + e.message + '\n\nMake sure server is running on http://127.0.0.1:8000', true));
+        }
+
+        // Show browser info
+        window.addEventListener('load', function() {
+            const info = `Browser: ${navigator.userAgent}
+JavaScript: Enabled
+Cookies: ${navigator.cookieEnabled ? 'Enabled' : 'DISABLED'}
+Location: ${window.location.href}`;
+            document.getElementById('browser-info').innerHTML = info;
+        });
+    </script>
+</body>
+</html>

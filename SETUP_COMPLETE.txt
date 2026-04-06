@@ -1,0 +1,68 @@
+## ✅ Port & Testing Setup Complete!
+
+### Created Files:
+
+#### 🚀 Server Launchers
+- **`run-local-server.bat`** (1.2 KB) - Windows double-click launcher
+- **`run-local-server.ps1`** (1.7 KB) - PowerShell launcher
+
+#### 📚 Documentation
+- **`TESTING.md`** - Complete testing workflows & debugging guide
+- **`QUICK_TEST_SETUP.md`** - Quick reference for testing
+- **`PORT_REFERENCE.txt`** - Quick port configuration reference
+- **`.env.example`** - Configuration template for customization
+
+#### 🔧 Updated Files
+- **`.github/copilot-instructions.md`** - Added testing setup info
+- **`index.php`** - Entry point (already includes prototype.php)
+
+---
+
+### 🎯 Access Testing Portal:
+
+**Port**: `8000`  
+**URL**: `http://127.0.0.1:8000`  
+**Password**: `admin123`
+
+---
+
+### ⚡ Quick Start:
+
+**Windows (Easiest)**:
+1. Double-click `run-local-server.bat`
+2. Browser opens to `http://127.0.0.1:8000`
+3. Login with `admin123`
+
+**Command Line (Any OS)**:
+```bash
+php -S 127.0.0.1:8000
+```
+
+---
+
+### 🧪 Test the Blacklist Logic:
+
+1. Add a user (NIP: 19800101)
+2. Add an asset (Serial: LNV-TEST-001)
+3. Borrow the item
+4. Try borrowing again → **Should be blocked** ✓
+5. Return the item
+6. Now you can borrow again ✓
+
+---
+
+### 📊 Test Data:
+
+Auto-created in:
+- `database.json` - All data
+- `activity_logs.json` - Activity trail
+
+Reset anytime: Delete both files and restart server
+
+---
+
+### 📖 Full Documentation:
+
+- **Detailed workflows**: See `TESTING.md`
+- **Architecture notes**: See `.github/copilot-instructions.md`
+- **API examples**: See `TESTING.md` → PHP Testing section
