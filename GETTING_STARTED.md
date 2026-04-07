@@ -11,6 +11,7 @@ SIM-IV is a comprehensive system for managing school asset borrowing and returns
 - Check return/check-in status
 - View borrowing history
 - Simple, user-friendly interface
+- Built-in user guide button with modal instructions
 - **Access**: Direct at `http://127.0.0.1:8000`
 
 ### 🔒 Admin Mode (Administrators)
@@ -51,11 +52,18 @@ Navigate to: **`http://127.0.0.1:8000`**
 
 You should see the public dashboard with:
 - "Dashboard Inventaris" header
+- "Cara Pakai Aplikasi" button
 - Asset borrowing section
 - Return/checkin section
 - "Login Admin" button in navbar
 
 ### 3. Test as Public User
+
+**Open User Guide**:
+1. Click **"Cara Pakai Aplikasi"** on the public dashboard
+2. Read the borrowing and return steps in the modal
+3. Click **"Mengerti"** to close the guide
+4. Continue using the dashboard normally
 
 **Borrow an Asset**:
 1. Enter Student/Teacher ID (use `19800101` for test)
@@ -122,13 +130,18 @@ d:\Website\Barang\
 - **Role**: Admin
 - **Password**: `admin123`
 - **Type**: Password-only authentication
+- **Recovery**: Bisa diaktifkan dari menu **Pengaturan > Keamanan Admin**
 
 ### Changing Password
-1. Edit [prototype.php](prototype.php#L55)
-2. Update the default in `getAdminPassword()` function
-3. **OR** Create `.env` file:
+1. Login sebagai admin
+2. Buka menu **Pengaturan**
+3. Gunakan panel **Keamanan Admin** untuk:
+   - mengganti password admin
+   - mengatur kode pemulihan untuk fitur lupa password
+4. Untuk setup production, Anda juga bisa menyiapkan `.env`:
    ```bash
    ADMIN_PASSWORD=your_new_secure_password
+   ADMIN_RECOVERY_CODE=your_recovery_code
    APP_ENV=production
    ```
 
@@ -196,6 +209,12 @@ Tracks all system actions:
 ## 🎮 Common Operations
 
 ### Public Mode Operations
+
+#### Open User Guide
+1. Stay on the public dashboard
+2. Click **"Cara Pakai Aplikasi"**
+3. Read the quick instructions for borrowing and returns
+4. Close the modal by clicking **"Mengerti"** or the close button
 
 #### Borrow an Asset
 1. Go to "Peminjaman" section

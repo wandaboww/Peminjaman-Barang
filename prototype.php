@@ -1,15 +1,4 @@
 <?php
-// Start session untuk authentication
-session_start();
-
-// Set Content-Type untuk HTML
-header('Content-Type: text/html; charset=UTF-8');
-
-// Prevent caching
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-header('Pragma: no-cache');
-header('Expires: 0');
-
 // ==========================================
 // ENVIRONMENT CONFIGURATION LOADER
 // ==========================================
@@ -40,52 +29,478 @@ function loadEnv($filePath = '.env') {
     }
 }
 
+function envConfig($key, $default = null) {
+    $value = $_ENV[$key] ?? getenv($key);
+    if ($value === false || $value === null || $value === '') {
+        return $default;
+    }
+    return $value;
+}
+
+function resolveProjectPath($path) {
+    if (!$path) {
+        return __DIR__;
+    }
+
+    if (preg_match('/^[A-Za-z]:[\\\\\\/]/', $path) || str_starts_with($path, '/') || str_starts_with($path, '\\')) {
+        return $path;
+    }
+
+    return __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
+}
+
+function loadJsonArrayFile($path, $default = []) {
+    if (!file_exists($path)) {
+        return $default;
+    }
+
+    $decoded = json_decode(file_get_contents($path), true);
+    return is_array($decoded) ? $decoded : $default;
+}
+
+function buildCsvContent(array $header, array $rows): string {
+    $handle = fopen('php://temp', 'r+');
+    fwrite($handle, "\xEF\xBB\xBF");
+    fputcsv($handle, $header);
+
+    foreach ($rows as $row) {
+        fputcsv($handle, $row);
+    }
+
+    rewind($handle);
+    $csv = stream_get_contents($handle);
+    fclose($handle);
+
+    return $csv === false ? '' : $csv;
+}
+
+function normalizeImportedCellValue($value): string {
+    if ($value === null) {
+        return '';
+    }
+
+    $value = (string) $value;
+    $value = preg_replace('/^\xEF\xBB\xBF/', '', $value);
+    return trim($value);
+}
+
+function isImportRowEmpty(array $row): bool {
+    foreach ($row as $cell) {
+        if (normalizeImportedCellValue($cell) !== '') {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function canImportXlsx(): bool {
+    return class_exists('ZipArchive');
+}
+
+function columnLettersToIndex(string $letters): int {
+    $letters = strtoupper($letters);
+    $index = 0;
+
+    for ($i = 0, $length = strlen($letters); $i < $length; $i++) {
+        $index = ($index * 26) + (ord($letters[$i]) - 64);
+    }
+
+    return max(0, $index - 1);
+}
+
+function extractXlsxInlineString(SimpleXMLElement $cell): string {
+    $text = '';
+
+    if (isset($cell->is->t)) {
+        $text .= (string) $cell->is->t;
+    }
+
+    foreach ($cell->is->r as $run) {
+        $text .= (string) $run->t;
+    }
+
+    return normalizeImportedCellValue($text);
+}
+
+function parseXlsxRows(string $filePath): array {
+    if (!canImportXlsx()) {
+        throw new Exception('Ekstensi ZipArchive tidak tersedia. Import XLSX belum bisa digunakan di server ini.');
+    }
+
+    $zip = new ZipArchive();
+    if ($zip->open($filePath) !== true) {
+        throw new Exception('File XLSX tidak dapat dibuka atau rusak.');
+    }
+
+    $sharedStrings = [];
+    $sharedStringsXml = $zip->getFromName('xl/sharedStrings.xml');
+    if ($sharedStringsXml !== false) {
+        $xml = simplexml_load_string($sharedStringsXml);
+        if ($xml !== false) {
+            foreach ($xml->si as $item) {
+                $text = '';
+                if (isset($item->t)) {
+                    $text .= (string) $item->t;
+                }
+                foreach ($item->r as $run) {
+                    $text .= (string) $run->t;
+                }
+                $sharedStrings[] = normalizeImportedCellValue($text);
+            }
+        }
+    }
+
+    $sheetPath = 'xl/worksheets/sheet1.xml';
+    if ($zip->locateName($sheetPath) === false) {
+        $sheetPath = null;
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $name = $zip->statIndex($i)['name'] ?? '';
+            if (preg_match('#^xl/worksheets/sheet\d+\.xml$#', $name)) {
+                $sheetPath = $name;
+                break;
+            }
+        }
+    }
+
+    if ($sheetPath === null) {
+        $zip->close();
+        throw new Exception('Worksheet XLSX tidak ditemukan.');
+    }
+
+    $sheetXml = $zip->getFromName($sheetPath);
+    $zip->close();
+
+    if ($sheetXml === false) {
+        throw new Exception('Isi worksheet XLSX tidak dapat dibaca.');
+    }
+
+    $xml = simplexml_load_string($sheetXml);
+    if ($xml === false || !isset($xml->sheetData)) {
+        throw new Exception('Format worksheet XLSX tidak valid.');
+    }
+
+    $rows = [];
+    foreach ($xml->sheetData->row as $row) {
+        $rowData = [];
+        $maxIndex = -1;
+
+        foreach ($row->c as $cell) {
+            $reference = (string) ($cell['r'] ?? '');
+            $columnLetters = preg_replace('/\d+/', '', $reference);
+            $columnIndex = $columnLetters !== '' ? columnLettersToIndex($columnLetters) : ($maxIndex + 1);
+            $maxIndex = max($maxIndex, $columnIndex);
+
+            $type = (string) ($cell['t'] ?? '');
+            $value = '';
+
+            if ($type === 's') {
+                $sharedIndex = (int) ($cell->v ?? 0);
+                $value = $sharedStrings[$sharedIndex] ?? '';
+            } elseif ($type === 'inlineStr') {
+                $value = extractXlsxInlineString($cell);
+            } elseif ($type === 'b') {
+                $value = ((string) ($cell->v ?? '0')) === '1' ? 'TRUE' : 'FALSE';
+            } else {
+                $value = normalizeImportedCellValue((string) ($cell->v ?? ''));
+            }
+
+            $rowData[$columnIndex] = $value;
+        }
+
+        if ($maxIndex < 0) {
+            continue;
+        }
+
+        $normalizedRow = [];
+        for ($index = 0; $index <= $maxIndex; $index++) {
+            $normalizedRow[] = $rowData[$index] ?? '';
+        }
+
+        if (!isImportRowEmpty($normalizedRow)) {
+            $rows[] = $normalizedRow;
+        }
+    }
+
+    return $rows;
+}
+
+function parseImportSpreadsheetRows(string $filePath, string $originalFileName): array {
+    $extension = strtolower(pathinfo($originalFileName, PATHINFO_EXTENSION));
+
+    if ($extension === 'csv') {
+        $rows = [];
+        $handle = fopen($filePath, 'r');
+        if ($handle === false) {
+            throw new Exception('File CSV tidak dapat dibaca.');
+        }
+
+        while (($data = fgetcsv($handle)) !== false) {
+            $normalizedRow = array_map('normalizeImportedCellValue', $data);
+            if (!isImportRowEmpty($normalizedRow)) {
+                $rows[] = $normalizedRow;
+            }
+        }
+
+        fclose($handle);
+        return $rows;
+    }
+
+    if ($extension === 'xlsx') {
+        return parseXlsxRows($filePath);
+    }
+
+    if ($extension === 'xls') {
+        throw new Exception('Format .xls belum didukung. Simpan file sebagai .xlsx atau .csv terlebih dahulu.');
+    }
+
+    throw new Exception('Format file harus .csv atau .xlsx.');
+}
+
 // Load .env file jika ada
 loadEnv(__DIR__ . '/.env');
+
+$appDebug = filter_var((string) envConfig('APP_DEBUG', 'false'), FILTER_VALIDATE_BOOLEAN);
+$httpsOnly = filter_var((string) envConfig('HTTPS_ONLY', 'false'), FILTER_VALIDATE_BOOLEAN);
+$csrfProtectionEnabled = filter_var((string) envConfig('CSRF_PROTECTION', 'true'), FILTER_VALIDATE_BOOLEAN);
+$isHttpsRequest = $httpsOnly
+    || (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || (isset($_SERVER['SERVER_PORT']) && (int) $_SERVER['SERVER_PORT'] === 443);
+
+ini_set('display_errors', $appDebug ? '1' : '0');
+error_reporting($appDebug ? E_ALL : 0);
+
+// Pastikan session disimpan ke folder lokal yang writable saat env PHP default tidak cocok.
+$sessionPath = __DIR__ . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'sessions';
+if (!is_dir($sessionPath)) {
+    mkdir($sessionPath, 0777, true);
+}
+if (is_dir($sessionPath) && is_writable($sessionPath)) {
+    session_save_path($sessionPath);
+}
+
+session_name('SIMIVSESSID');
+session_set_cookie_params([
+    'lifetime' => 0,
+    'path' => '/',
+    'domain' => '',
+    'secure' => $isHttpsRequest,
+    'httponly' => true,
+    'samesite' => 'Lax'
+]);
+
+// Start session untuk authentication
+session_start();
+
+function getCsrfToken() {
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf_token'];
+}
+
+function handleCsrfFailure() {
+    $message = 'Sesi keamanan tidak valid. Silakan refresh halaman lalu coba lagi.';
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    $expectsJson = isset($_GET['action']) || stripos($contentType, 'application/json') !== false;
+
+    if ($expectsJson) {
+        http_response_code(419);
+        header('Content-Type: application/json; charset=UTF-8');
+        echo json_encode([
+            'success' => false,
+            'message' => $message
+        ]);
+    } else {
+        $_SESSION['login_error'] = '❌ ' . $message;
+        header('Location: ?view=login');
+    }
+
+    exit;
+}
+
+function validateCsrfRequest($input = []) {
+    global $csrfProtectionEnabled;
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !$csrfProtectionEnabled) {
+        return;
+    }
+
+    $providedToken = $_SERVER['HTTP_X_CSRF_TOKEN']
+        ?? ($_POST['csrf_token'] ?? null)
+        ?? (($input['csrf_token'] ?? null));
+
+    if (!is_string($providedToken) || !hash_equals(getCsrfToken(), $providedToken)) {
+        handleCsrfFailure();
+    }
+}
+
+getCsrfToken();
+
+// Set Content-Type untuk HTML
+header('Content-Type: text/html; charset=UTF-8');
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+
+// Prevent caching
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
 
 // ==========================================
 // SIMPLE AUTHENTICATION & AUTHORIZATION SYSTEM
 // ==========================================
 class AuthManager {
     private static $adminPassword = null;
+    private static $envRecoveryCode = null;
     
     /**
      * Get admin password dari environment atau gunakan default (development only)
      */
     private static function getAdminPassword() {
         if (self::$adminPassword === null) {
+            $defaultPassword = strtolower((string) envConfig('APP_ENV', 'production')) === 'production'
+                ? ''
+                : 'admin123';
+
             // Coba dari environment variable dulu
             self::$adminPassword = $_ENV['ADMIN_PASSWORD'] ?? 
                                    getenv('ADMIN_PASSWORD') ?? 
-                                   'admin123'; // Default untuk development
+                                   $defaultPassword;
             
             // Warn jika pakai default (di production)
-            if (self::$adminPassword === 'admin123' && 
-                ($_ENV['APP_ENV'] ?? getenv('APP_ENV')) === 'production') {
-                error_log('WARNING: Using default admin password in production!');
+            if (self::$adminPassword === '' &&
+                strtolower((string) ($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?? 'production')) === 'production') {
+                error_log('ERROR: ADMIN_PASSWORD is not configured for production.');
             }
         }
         return self::$adminPassword;
     }
-    
-    /**
-     * Debug method - show password for testing (remove in production)
-     */
-    public static function getPasswordForDebug() {
-        return self::getAdminPassword();
+
+    private static function getStoredPasswordHash() {
+        global $db;
+
+        if (!isset($db) || !is_object($db) || !method_exists($db, 'getSetting')) {
+            return '';
+        }
+
+        return (string) $db->getSetting('admin_password_hash', '');
+    }
+
+    private static function getEnvRecoveryCode() {
+        if (self::$envRecoveryCode === null) {
+            self::$envRecoveryCode = (string) ($_ENV['ADMIN_RECOVERY_CODE']
+                ?? getenv('ADMIN_RECOVERY_CODE')
+                ?? '');
+        }
+
+        return self::$envRecoveryCode;
     }
     
     public static function isLoggedIn() {
         return isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
     }
+
+    public static function verifyPassword($password) {
+        $password = (string) $password;
+        $storedHash = self::getStoredPasswordHash();
+
+        if ($storedHash !== '') {
+            return password_verify($password, $storedHash);
+        }
+
+        $fallbackPassword = self::getAdminPassword();
+        if ($fallbackPassword === '') {
+            return false;
+        }
+
+        return hash_equals($fallbackPassword, $password);
+    }
     
     public static function login($password) {
-        if ($password === self::getAdminPassword()) {
+        if (self::verifyPassword($password)) {
             $_SESSION['admin_logged_in'] = true;
             $_SESSION['login_time'] = time();
             return true;
         }
         return false;
+    }
+
+    public static function setPassword($password) {
+        global $db;
+
+        if (!isset($db) || !is_object($db) || !method_exists($db, 'setSetting')) {
+            throw new RuntimeException('Penyimpanan password admin tidak tersedia.');
+        }
+
+        $hash = password_hash((string) $password, PASSWORD_DEFAULT);
+        $db->setSetting('admin_password_hash', $hash);
+        $db->setSetting('admin_password_updated_at', date('Y-m-d H:i:s'));
+    }
+
+    public static function verifyRecoveryCode($code) {
+        global $db;
+
+        $code = trim((string) $code);
+        if ($code === '') {
+            return false;
+        }
+
+        if (isset($db) && is_object($db) && method_exists($db, 'getSetting')) {
+            $storedHash = (string) $db->getSetting('admin_recovery_code_hash', '');
+            if ($storedHash !== '') {
+                return password_verify($code, $storedHash);
+            }
+        }
+
+        $envRecoveryCode = self::getEnvRecoveryCode();
+        return $envRecoveryCode !== '' && hash_equals($envRecoveryCode, $code);
+    }
+
+    public static function setRecoveryCode($code) {
+        global $db;
+
+        if (!isset($db) || !is_object($db) || !method_exists($db, 'setSetting')) {
+            throw new RuntimeException('Penyimpanan recovery code tidak tersedia.');
+        }
+
+        $hash = password_hash(trim((string) $code), PASSWORD_DEFAULT);
+        $db->setSetting('admin_recovery_code_hash', $hash);
+        $db->setSetting('admin_recovery_code_updated_at', date('Y-m-d H:i:s'));
+    }
+
+    public static function hasCustomPassword() {
+        return self::getStoredPasswordHash() !== '';
+    }
+
+    public static function getPasswordSource() {
+        return self::hasCustomPassword() ? 'app' : 'env';
+    }
+
+    public static function hasRecoveryCode() {
+        global $db;
+
+        if (isset($db) && is_object($db) && method_exists($db, 'getSetting')) {
+            if ((string) $db->getSetting('admin_recovery_code_hash', '') !== '') {
+                return true;
+            }
+        }
+
+        return self::getEnvRecoveryCode() !== '';
+    }
+
+    public static function getRecoveryCodeSource() {
+        global $db;
+
+        if (isset($db) && is_object($db) && method_exists($db, 'getSetting')) {
+            if ((string) $db->getSetting('admin_recovery_code_hash', '') !== '') {
+                return 'app';
+            }
+        }
+
+        return self::getEnvRecoveryCode() !== '' ? 'env' : 'none';
     }
     
     public static function logout() {
@@ -95,6 +510,44 @@ class AuthManager {
     public static function isAdmin() {
         return self::isLoggedIn();
     }
+}
+
+function validateAdminPasswordInput($newPassword, $confirmPassword) {
+    $newPassword = (string) $newPassword;
+    $confirmPassword = (string) $confirmPassword;
+
+    if ($newPassword === '' || $confirmPassword === '') {
+        throw new InvalidArgumentException('Password baru dan konfirmasi password wajib diisi.');
+    }
+
+    if (strlen($newPassword) < 8) {
+        throw new InvalidArgumentException('Password baru minimal 8 karakter.');
+    }
+
+    if ($newPassword !== $confirmPassword) {
+        throw new InvalidArgumentException('Konfirmasi password baru tidak cocok.');
+    }
+
+    return $newPassword;
+}
+
+function validateRecoveryCodeInput($recoveryCode, $confirmRecoveryCode) {
+    $recoveryCode = trim((string) $recoveryCode);
+    $confirmRecoveryCode = trim((string) $confirmRecoveryCode);
+
+    if ($recoveryCode === '' || $confirmRecoveryCode === '') {
+        throw new InvalidArgumentException('Kode pemulihan dan konfirmasinya wajib diisi.');
+    }
+
+    if (strlen($recoveryCode) < 6) {
+        throw new InvalidArgumentException('Kode pemulihan minimal 6 karakter.');
+    }
+
+    if ($recoveryCode !== $confirmRecoveryCode) {
+        throw new InvalidArgumentException('Konfirmasi kode pemulihan tidak cocok.');
+    }
+
+    return $recoveryCode;
 }
 
 // prototype.php - Single File Simulation of the School Inventory System
@@ -315,11 +768,493 @@ class ActivityLog {
         
         return array_values($filtered);
     }
+
+    public function clear() {
+        $this->logs = [];
+        $this->save();
+    }
+}
+
+class SqliteDB {
+    private string $file;
+    private PDO $pdo;
+    private array $defaultSettings = [
+        'running_text' => 'Selamat datang di Sistem Manajemen Aset Sekolah',
+        'animation_speed' => '20',
+        'bg_color' => '#667eea',
+        'bg_color_end' => '#764ba2',
+        'text_color' => '#ffffff',
+        'font_family' => 'Arial, sans-serif'
+    ];
+
+    public function __construct($file, $legacyJsonFile = null) {
+        $this->file = $file;
+
+        $directory = dirname($file);
+        if (!is_dir($directory)) {
+            mkdir($directory, 0777, true);
+        }
+
+        $this->pdo = new PDO('sqlite:' . $file);
+        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        $this->pdo->exec('PRAGMA foreign_keys = ON');
+        $this->pdo->exec('PRAGMA busy_timeout = 5000');
+
+        $this->initializeSchema();
+        $this->ensureDefaultSettings();
+
+        if ($this->isDataTableEmpty('users') && $this->isDataTableEmpty('assets')) {
+            if ($legacyJsonFile && file_exists($legacyJsonFile)) {
+                $this->importLegacyJsonDatabase($legacyJsonFile);
+            } else {
+                $this->seedDefaults();
+            }
+        }
+    }
+
+    public function getPdo() {
+        return $this->pdo;
+    }
+
+    private function initializeSchema() {
+        $statements = [
+            "CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                identity_number TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL,
+                kelas TEXT DEFAULT '-',
+                email TEXT,
+                phone TEXT
+            )",
+            "CREATE TABLE IF NOT EXISTS assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand TEXT NOT NULL,
+                model TEXT NOT NULL,
+                serial_number TEXT NOT NULL UNIQUE,
+                category TEXT,
+                barcode TEXT UNIQUE,
+                status TEXT NOT NULL DEFAULT 'available'
+            )",
+            "CREATE TABLE IF NOT EXISTS loans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                asset_id INTEGER NOT NULL,
+                loan_date TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                return_date TEXT,
+                return_condition TEXT,
+                return_notes TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+            )",
+            "CREATE TABLE IF NOT EXISTS settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL
+            )",
+            "CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                action TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                data TEXT NOT NULL,
+                details TEXT,
+                user_agent TEXT
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_users_identity_number ON users(identity_number)",
+            "CREATE INDEX IF NOT EXISTS idx_assets_serial_number ON assets(serial_number)",
+            "CREATE INDEX IF NOT EXISTS idx_assets_barcode ON assets(barcode)",
+            "CREATE INDEX IF NOT EXISTS idx_loans_user_id ON loans(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_loans_asset_id ON loans(asset_id)",
+            "CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_logs_timestamp ON activity_logs(timestamp)"
+        ];
+
+        foreach ($statements as $statement) {
+            $this->pdo->exec($statement);
+        }
+
+        $this->ensureColumnExists('users', 'email', 'TEXT');
+        $this->ensureColumnExists('users', 'phone', 'TEXT');
+    }
+
+    private function ensureColumnExists($table, $column, $definition) {
+        $statement = $this->pdo->query("PRAGMA table_info({$table})");
+        $columns = $statement->fetchAll();
+
+        foreach ($columns as $existingColumn) {
+            if (($existingColumn['name'] ?? null) === $column) {
+                return;
+            }
+        }
+
+        $this->pdo->exec("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+    }
+
+    private function ensureDefaultSettings() {
+        foreach ($this->defaultSettings as $key => $value) {
+            $this->setSetting($key, $this->getSetting($key, $value));
+        }
+    }
+
+    private function isDataTableEmpty($table) {
+        $this->assertTable($table);
+        return (int) $this->pdo->query("SELECT COUNT(*) FROM {$table}")->fetchColumn() === 0;
+    }
+
+    private function importLegacyJsonDatabase($legacyJsonFile) {
+        $data = loadJsonArrayFile($legacyJsonFile, []);
+        if (empty($data)) {
+            $this->seedDefaults();
+            return;
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            foreach (($data['users'] ?? []) as $user) {
+                $this->insert('users', [
+                    'id' => $user['id'] ?? null,
+                    'name' => $user['name'] ?? '',
+                    'identity_number' => $user['identity_number'] ?? '',
+                    'role' => $user['role'] ?? 'student',
+                    'kelas' => $user['kelas'] ?? '-',
+                    'email' => $user['email'] ?? null,
+                    'phone' => $user['phone'] ?? null
+                ]);
+            }
+
+            foreach (($data['assets'] ?? []) as $asset) {
+                $this->insert('assets', [
+                    'id' => $asset['id'] ?? null,
+                    'brand' => $asset['brand'] ?? '',
+                    'model' => $asset['model'] ?? '',
+                    'serial_number' => $asset['serial_number'] ?? '',
+                    'category' => $asset['category'] ?? null,
+                    'barcode' => $asset['barcode'] ?? null,
+                    'status' => $asset['status'] ?? 'available'
+                ]);
+            }
+
+            foreach (($data['loans'] ?? []) as $loan) {
+                $this->insert('loans', [
+                    'id' => $loan['id'] ?? null,
+                    'user_id' => $loan['user_id'] ?? null,
+                    'asset_id' => $loan['asset_id'] ?? null,
+                    'loan_date' => $loan['loan_date'] ?? '',
+                    'due_date' => $loan['due_date'] ?? '',
+                    'status' => $loan['status'] ?? 'active',
+                    'return_date' => $loan['return_date'] ?? null,
+                    'return_condition' => $loan['return_condition'] ?? null,
+                    'return_notes' => $loan['return_notes'] ?? null
+                ]);
+            }
+
+            foreach (($data['settings'] ?? []) as $key => $value) {
+                $this->setSetting($key, is_scalar($value) ? (string) $value : json_encode($value));
+            }
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    private function seedDefaults() {
+        $this->insert('users', ['name' => 'Pak Budi (Guru)', 'identity_number' => '19800101', 'role' => 'teacher', 'kelas' => '-', 'email' => null, 'phone' => null]);
+        $this->insert('users', ['name' => 'Ani (Siswa)', 'identity_number' => '2024001', 'role' => 'student', 'kelas' => '10 PPLG 1', 'email' => null, 'phone' => null]);
+        $this->insert('users', ['name' => 'Budi (Siswa Nakal)', 'identity_number' => '2024002', 'role' => 'student', 'kelas' => '10 PPLG 2', 'email' => null, 'phone' => null]);
+
+        $this->insert('assets', ['brand' => 'Lenovo', 'model' => 'ThinkPad X1', 'serial_number' => 'LNV-001', 'category' => 'Laptop', 'barcode' => 'LNV-001', 'status' => 'available']);
+        $this->insert('assets', ['brand' => 'Epson', 'model' => 'Projector EB-X', 'serial_number' => 'EPS-001', 'category' => 'Proyektor', 'barcode' => 'EPS-001', 'status' => 'available']);
+        $this->insert('assets', ['brand' => 'Logitech', 'model' => 'Mouse Wireless', 'serial_number' => 'LOG-001', 'category' => 'Aksesoris', 'barcode' => 'LOG-001', 'status' => 'maintenance']);
+    }
+
+    private function assertTable($table) {
+        $allowed = ['users', 'assets', 'loans'];
+        if (!in_array($table, $allowed, true)) {
+            throw new InvalidArgumentException("Unsupported table: {$table}");
+        }
+    }
+
+    private function assertColumn($column) {
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $column)) {
+            throw new InvalidArgumentException("Unsupported column: {$column}");
+        }
+    }
+
+    public function getAll($table) {
+        $this->assertTable($table);
+        $statement = $this->pdo->query("SELECT * FROM {$table} ORDER BY id ASC");
+        return $statement->fetchAll();
+    }
+
+    public function find($table, $id) {
+        $this->assertTable($table);
+        $statement = $this->pdo->prepare("SELECT * FROM {$table} WHERE id = :id LIMIT 1");
+        $statement->execute([':id' => $id]);
+        $result = $statement->fetch();
+        return $result ?: null;
+    }
+
+    public function findByColumn($table, $column, $value) {
+        $this->assertTable($table);
+        $this->assertColumn($column);
+        $statement = $this->pdo->prepare("SELECT * FROM {$table} WHERE LOWER(CAST({$column} AS TEXT)) = LOWER(:value) LIMIT 1");
+        $statement->execute([':value' => (string) $value]);
+        $result = $statement->fetch();
+        return $result ?: null;
+    }
+
+    public function insert($table, $item) {
+        $this->assertTable($table);
+
+        $filtered = [];
+        foreach ($item as $key => $value) {
+            if ($value === null || $value === '') {
+                if ($key === 'id' || $key === 'return_date' || $key === 'return_condition' || $key === 'return_notes' || $key === 'category' || $key === 'barcode') {
+                    if ($key !== 'id') {
+                        $filtered[$key] = null;
+                    }
+                    continue;
+                }
+            }
+            $this->assertColumn($key);
+            if ($key === 'id' && ($value === null || $value === '')) {
+                continue;
+            }
+            $filtered[$key] = $value;
+        }
+
+        $columns = array_keys($filtered);
+        $placeholders = array_map(fn($column) => ':' . $column, $columns);
+
+        $statement = $this->pdo->prepare(
+            "INSERT INTO {$table} (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $placeholders) . ")"
+        );
+
+        foreach ($filtered as $column => $value) {
+            $statement->bindValue(':' . $column, $value);
+        }
+
+        $statement->execute();
+        return isset($filtered['id']) ? (int) $filtered['id'] : (int) $this->pdo->lastInsertId();
+    }
+
+    public function update($table, $id, $updates) {
+        $this->assertTable($table);
+        if (empty($updates)) {
+            return false;
+        }
+
+        $clauses = [];
+        foreach ($updates as $column => $value) {
+            $this->assertColumn($column);
+            $clauses[] = "{$column} = :{$column}";
+        }
+
+        $statement = $this->pdo->prepare(
+            "UPDATE {$table} SET " . implode(', ', $clauses) . " WHERE id = :id"
+        );
+
+        foreach ($updates as $column => $value) {
+            $statement->bindValue(':' . $column, $value);
+        }
+        $statement->bindValue(':id', $id);
+
+        return $statement->execute();
+    }
+
+    public function delete($table, $id) {
+        $this->assertTable($table);
+        $statement = $this->pdo->prepare("DELETE FROM {$table} WHERE id = :id");
+        return $statement->execute([':id' => $id]);
+    }
+
+    public function getSetting($key, $default = null) {
+        $statement = $this->pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = :setting_key LIMIT 1");
+        $statement->execute([':setting_key' => $key]);
+        $value = $statement->fetchColumn();
+        return ($value === false || $value === null) ? $default : $value;
+    }
+
+    public function setSetting($key, $value) {
+        $statement = $this->pdo->prepare(
+            "INSERT INTO settings (setting_key, setting_value) VALUES (:setting_key, :setting_value)
+             ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value"
+        );
+        return $statement->execute([
+            ':setting_key' => $key,
+            ':setting_value' => (string) $value
+        ]);
+    }
+
+    public function getAllSettings() {
+        $rows = $this->pdo->query("SELECT setting_key, setting_value FROM settings")->fetchAll();
+        $settings = [];
+        foreach ($rows as $row) {
+            $settings[$row['setting_key']] = $row['setting_value'];
+        }
+        return $settings;
+    }
+
+    public function getLoansWithDetails() {
+        $statement = $this->pdo->query(
+            "SELECT
+                l.*,
+                u.name AS user_name,
+                u.identity_number AS user_identity,
+                u.kelas AS user_kelas,
+                a.brand || ' ' || a.model AS asset_name,
+                a.brand AS asset_brand,
+                a.model AS asset_model,
+                a.serial_number AS asset_serial_number
+            FROM loans l
+            LEFT JOIN users u ON u.id = l.user_id
+            LEFT JOIN assets a ON a.id = l.asset_id
+            ORDER BY l.id DESC"
+        );
+        return $statement->fetchAll();
+    }
+}
+
+class SqliteActivityLog {
+    private PDO $pdo;
+
+    public function __construct($pdo, $legacyFile = null) {
+        $this->pdo = $pdo;
+
+        if ($legacyFile && file_exists($legacyFile) && $this->isEmpty()) {
+            $this->importLegacyLogs($legacyFile);
+        }
+    }
+
+    private function isEmpty() {
+        return (int) $this->pdo->query("SELECT COUNT(*) FROM activity_logs")->fetchColumn() === 0;
+    }
+
+    private function importLegacyLogs($legacyFile) {
+        $logs = loadJsonArrayFile($legacyFile, []);
+        if (empty($logs)) {
+            return;
+        }
+
+        $statement = $this->pdo->prepare(
+            "INSERT INTO activity_logs (id, timestamp, action, table_name, data, details, user_agent)
+             VALUES (:id, :timestamp, :action, :table_name, :data, :details, :user_agent)"
+        );
+
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($logs as $log) {
+                $statement->execute([
+                    ':id' => $log['id'] ?? null,
+                    ':timestamp' => $log['timestamp'] ?? date('Y-m-d H:i:s'),
+                    ':action' => $log['action'] ?? 'INFO',
+                    ':table_name' => $log['table'] ?? 'system',
+                    ':data' => $log['data'] ?? '',
+                    ':details' => $log['details'] ?? '',
+                    ':user_agent' => $log['user_agent'] ?? 'Unknown'
+                ]);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    public function log($action, $table, $data, $details = '') {
+        $statement = $this->pdo->prepare(
+            "INSERT INTO activity_logs (timestamp, action, table_name, data, details, user_agent)
+             VALUES (:timestamp, :action, :table_name, :data, :details, :user_agent)"
+        );
+
+        $statement->execute([
+            ':timestamp' => date('Y-m-d H:i:s'),
+            ':action' => $action,
+            ':table_name' => $table,
+            ':data' => $data,
+            ':details' => $details,
+            ':user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown'
+        ]);
+
+        $this->pdo->exec(
+            "DELETE FROM activity_logs
+             WHERE id NOT IN (
+                SELECT id FROM activity_logs ORDER BY id DESC LIMIT 1000
+             )"
+        );
+    }
+
+    public function getAll() {
+        $statement = $this->pdo->query(
+            "SELECT id, timestamp, action, table_name AS log_table, data, details, user_agent
+             FROM activity_logs
+             ORDER BY id DESC"
+        );
+        $rows = $statement->fetchAll();
+
+        foreach ($rows as &$row) {
+            $row['table'] = $row['log_table'] ?? 'system';
+            unset($row['log_table']);
+        }
+
+        return $rows;
+    }
+
+    public function filter($table = null, $action = null) {
+        $query = "SELECT id, timestamp, action, table_name AS log_table, data, details, user_agent FROM activity_logs";
+        $conditions = [];
+        $params = [];
+
+        if ($table) {
+            $conditions[] = "table_name = :table_name";
+            $params[':table_name'] = $table;
+        }
+
+        if ($action) {
+            $conditions[] = "action = :action";
+            $params[':action'] = $action;
+        }
+
+        if (!empty($conditions)) {
+            $query .= " WHERE " . implode(' AND ', $conditions);
+        }
+
+        $query .= " ORDER BY id DESC";
+        $statement = $this->pdo->prepare($query);
+        $statement->execute($params);
+        $rows = $statement->fetchAll();
+
+        foreach ($rows as &$row) {
+            $row['table'] = $row['log_table'] ?? 'system';
+            unset($row['log_table']);
+        }
+
+        return $rows;
+    }
+
+    public function clear() {
+        $this->pdo->exec("DELETE FROM activity_logs");
+    }
 }
 
 // Initialize DB
-$db = new JsonDB(__DIR__ . '/database.json');
-$activityLog = new ActivityLog(__DIR__ . '/activity_logs.json');
+$dbDriver = strtolower((string) envConfig('DB_DRIVER', 'json'));
+$jsonDatabasePath = resolveProjectPath(envConfig('DATABASE_FILE', 'database.json'));
+$activityLogPath = resolveProjectPath(envConfig('ACTIVITY_LOG_FILE', 'activity_logs.json'));
+$sqliteDatabasePath = resolveProjectPath(envConfig('SQLITE_DATABASE_FILE', 'database/sim_inventaris.sqlite'));
+
+if ($dbDriver === 'sqlite') {
+    $db = new SqliteDB($sqliteDatabasePath, $jsonDatabasePath);
+    $activityLog = new SqliteActivityLog($db->getPdo(), $activityLogPath);
+} else {
+    $db = new JsonDB($jsonDatabasePath);
+    $activityLog = new ActivityLog($activityLogPath);
+}
 
 // 2. Logic Functions
 function calculateDueDate($role) {
@@ -337,23 +1272,13 @@ function checkBlacklist($db, $userId) {
 }
 
 // ==========================================
-// TRADITIONAL LOGOUT HANDLER (GET request)
-// ==========================================
-if (isset($_GET['action']) && $_GET['action'] === 'logout') {
-    session_destroy();
-    header('Location: ?view=dashboard');
-    exit;
-}
-
-// ==========================================
 // TRADITIONAL LOGIN HANDLER (POST form submit)
 // ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'traditional_login') {
+    validateCsrfRequest($_POST);
     $password = $_POST['password'] ?? '';
     
-    if (trim($password) === 'admin123') {
-        $_SESSION['admin_logged_in'] = true;
-        $_SESSION['login_time'] = time();
+    if (AuthManager::login(trim($password))) {
         header('Location: ?view=dashboard');
         exit;
     } else {
@@ -365,8 +1290,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
 // 3. Handle API Requests
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    header('Content-Type: application/json');
-    $input = json_decode(file_get_contents('php://input'), true);
+    $rawInput = file_get_contents('php://input');
+    $input = json_decode($rawInput, true);
+    if (!is_array($input)) {
+        $input = [];
+    }
+    validateCsrfRequest($input);
+    header('Content-Type: application/json; charset=UTF-8');
     $action = $_GET['action'] ?? '';
 
     try {
@@ -375,10 +1305,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             header('Content-Type: application/json');
             $password = isset($_POST['password']) ? $_POST['password'] : (isset($input['password']) ? $input['password'] : '');
             
-            // SIMPLE LOGIN - Password harus 'admin123'
-            if (trim($password) === 'admin123') {
-                $_SESSION['admin_logged_in'] = true;
-                $_SESSION['login_time'] = time();
+            if (AuthManager::login(trim($password))) {
                 http_response_code(200);
                 echo json_encode([
                     'success' => true,
@@ -391,6 +1318,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'message' => 'Password salah'
                 ]);
             }
+            exit;
+        }
+
+        if ($action === 'change_admin_password') {
+            if (!AuthManager::isAdmin()) {
+                throw new Exception("❌ Akses ditolak! Anda harus login sebagai admin.");
+            }
+
+            $currentPassword = (string) ($input['current_password'] ?? '');
+            $newPassword = validateAdminPasswordInput(
+                $input['new_password'] ?? '',
+                $input['confirm_password'] ?? ''
+            );
+
+            if (!AuthManager::verifyPassword($currentPassword)) {
+                throw new Exception("❌ Password admin saat ini tidak sesuai.");
+            }
+
+            AuthManager::setPassword($newPassword);
+            $activityLog->log('UPDATE', 'settings', 'Password admin diperbarui', 'Perubahan password melalui halaman pengaturan');
+
+            echo json_encode([
+                'success' => true,
+                'message' => '✅ Password admin berhasil diperbarui.'
+            ]);
+            exit;
+        }
+
+        if ($action === 'update_admin_recovery_code') {
+            if (!AuthManager::isAdmin()) {
+                throw new Exception("❌ Akses ditolak! Anda harus login sebagai admin.");
+            }
+
+            $currentPassword = (string) ($input['current_password'] ?? '');
+            $recoveryCode = validateRecoveryCodeInput(
+                $input['recovery_code'] ?? '',
+                $input['confirm_recovery_code'] ?? ''
+            );
+
+            if (!AuthManager::verifyPassword($currentPassword)) {
+                throw new Exception("❌ Password admin saat ini tidak sesuai.");
+            }
+
+            AuthManager::setRecoveryCode($recoveryCode);
+            $activityLog->log('UPDATE', 'settings', 'Kode pemulihan admin diperbarui', 'Recovery code diperbarui melalui halaman pengaturan');
+
+            echo json_encode([
+                'success' => true,
+                'message' => '✅ Kode pemulihan berhasil disimpan.'
+            ]);
+            exit;
+        }
+
+        if ($action === 'forgot_admin_password') {
+            $recoveryCode = trim((string) ($input['recovery_code'] ?? ''));
+            $newPassword = validateAdminPasswordInput(
+                $input['new_password'] ?? '',
+                $input['confirm_password'] ?? ''
+            );
+
+            if (!AuthManager::hasRecoveryCode()) {
+                throw new Exception("⚠️ Fitur lupa password belum dikonfigurasi. Atur kode pemulihan terlebih dahulu dari menu Pengaturan.");
+            }
+
+            if (!AuthManager::verifyRecoveryCode($recoveryCode)) {
+                throw new Exception("❌ Kode pemulihan tidak valid.");
+            }
+
+            AuthManager::setPassword($newPassword);
+            $activityLog->log('UPDATE', 'settings', 'Password admin direset', 'Reset password menggunakan recovery code');
+
+            echo json_encode([
+                'success' => true,
+                'message' => '✅ Password admin berhasil direset. Silakan login menggunakan password baru.'
+            ]);
             exit;
         }
         
@@ -420,8 +1422,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new Exception("❌ Akses ditolak! Hanya admin yang dapat menghapus log.");
             }
             
-            // Clear the activity logs file
-            file_put_contents(__DIR__ . '/activity_logs.json', json_encode([], JSON_PRETTY_PRINT));
+            if (!AuthManager::hasRecoveryCode()) {
+                throw new Exception("⚠️ Kode pemulihan belum dikonfigurasi. Atur dulu di menu Pengaturan > Keamanan Admin.");
+            }
+
+            $recoveryCode = trim((string) ($input['recovery_code'] ?? ''));
+            if (!AuthManager::verifyRecoveryCode($recoveryCode)) {
+                throw new Exception("❌ Kode pemulihan tidak valid. Semua log tidak jadi dihapus.");
+            }
+
+            if (method_exists($db, 'setSetting')) {
+                $db->setSetting('logs_last_cleared_at', date('Y-m-d H:i:s'));
+                $db->setSetting('logs_last_cleared_by', 'admin');
+            }
+
+            $activityLog->clear();
             echo json_encode(['success' => true, 'message' => "✅ Semua log berhasil dihapus."]);
             exit;
         }
@@ -441,7 +1456,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'bg_color' => $db->getSetting('bg_color', '#667eea'),
                 'bg_color_end' => $db->getSetting('bg_color_end', '#764ba2'),
                 'text_color' => $db->getSetting('text_color', '#ffffff'),
-                'font_family' => $db->getSetting('font_family', 'Arial, sans-serif')
+                'font_family' => $db->getSetting('font_family', 'Arial, sans-serif'),
+                'admin_password_source' => AuthManager::getPasswordSource(),
+                'admin_password_updated_at' => $db->getSetting('admin_password_updated_at', ''),
+                'admin_has_recovery_code' => AuthManager::hasRecoveryCode(),
+                'admin_recovery_code_source' => AuthManager::getRecoveryCodeSource(),
+                'admin_recovery_code_updated_at' => $db->getSetting('admin_recovery_code_updated_at', '')
             ];
             
             echo json_encode(['success' => true, 'settings' => $settings]);
@@ -880,23 +1900,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // --- EXCEL/CSV OPERATIONS ---
 
         if ($action === 'export_users_csv') {
-            $users = $db->getAll('users');
-            
-            // Prepare CSV content
-            $output = "ID (NISN/NIP),Nama Lengkap,Kelas,Status,Email,No. Telepon\n";
-            
-            foreach($users as $u) {
-                $identity = '"' . str_replace('"', '""', $u['identity_number']) . '"';
-                $name = '"' . str_replace('"', '""', $u['name']) . '"';
-                $kelas = '"' . str_replace('"', '""', $u['kelas'] ?? '') . '"';
-                $role = ($u['role'] ?? 'student') === 'teacher' ? 'Guru' : 'Pelajar';
-                $email = '"' . str_replace('"', '""', $u['email'] ?? '') . '"';
-                $phone = '"' . str_replace('"', '""', $u['phone'] ?? '') . '"';
-                
-                $output .= "{$identity},{$name},{$kelas},{$role},{$email},{$phone}\n";
+            if (!AuthManager::isLoggedIn()) {
+                throw new Exception("❌ Akses ditolak! Anda harus login sebagai admin.");
             }
-            
-            // Send CSV file download
+
+            $users = $db->getAll('users');
+
+            $rows = [];
+            foreach ($users as $u) {
+                $rows[] = [
+                    $u['identity_number'] ?? '',
+                    $u['name'] ?? '',
+                    $u['kelas'] ?? '',
+                    ($u['role'] ?? 'student') === 'teacher' ? 'Guru' : 'Pelajar',
+                    $u['email'] ?? '',
+                    $u['phone'] ?? ''
+                ];
+            }
+
+            $output = buildCsvContent([
+                'Nomor Identitas (NISN/NIP)',
+                'Nama Lengkap',
+                'Kelas / Unit',
+                'Peran Pengguna (Guru/Pelajar)',
+                'Email',
+                'No. Telepon'
+            ], $rows);
+
             header('Content-Type: text/csv; charset=utf-8');
             header('Content-Disposition: attachment; filename="data_pengguna_' . date('Y-m-d_His') . '.csv"');
             echo $output;
@@ -904,38 +1934,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($action === 'import_users_csv') {
+            if (!AuthManager::isLoggedIn()) {
+                throw new Exception("❌ Akses ditolak! Anda harus login sebagai admin.");
+            }
+
             if (!isset($_FILES['csvFile']) || $_FILES['csvFile']['error'] !== UPLOAD_ERR_OK) {
                 throw new Exception("File tidak terupload dengan benar!");
             }
 
-            $file = $_FILES['csvFile']['tmp_name'];
-            
-            // Validate file extension
             $filename = $_FILES['csvFile']['name'];
-            $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-            if(!in_array($ext, ['csv', 'xlsx', 'xls'])) {
-                throw new Exception("Format file harus CSV atau Excel (.csv, .xlsx, .xls)!");
+            $rows = parseImportSpreadsheetRows($_FILES['csvFile']['tmp_name'], $filename);
+            if (count($rows) < 2) {
+                throw new Exception("File impor pengguna kosong atau hanya berisi header.");
             }
 
-            // Parse CSV
             $imported = 0;
             $errors = [];
-            $handle = fopen($file, 'r');
-            $header = fgetcsv($handle); // Skip header row
-            
             $line = 1;
-            while(($data = fgetcsv($handle)) !== FALSE) {
+            foreach (array_slice($rows, 1) as $data) {
                 $line++;
-                if(count($data) < 4) continue; // Skip empty lines
+                if(count($data) < 4) continue;
                 
                 try {
+                    $emailValue = normalizeImportedCellValue($data[4] ?? '');
+                    $phoneValue = normalizeImportedCellValue($data[5] ?? '');
                     $u = [
-                        'identity_number' => trim($data[0]),
-                        'name' => trim($data[1]),
-                        'kelas' => trim($data[2]),
-                        'role' => strtolower(trim($data[3])) === 'guru' ? 'teacher' : 'student',
-                        'email' => isset($data[4]) && !empty(trim($data[4])) ? trim($data[4]) : null,
-                        'phone' => isset($data[5]) && !empty(trim($data[5])) ? trim($data[5]) : null
+                        'identity_number' => normalizeImportedCellValue($data[0] ?? ''),
+                        'name' => normalizeImportedCellValue($data[1] ?? ''),
+                        'kelas' => normalizeImportedCellValue($data[2] ?? ''),
+                        'role' => strtolower(normalizeImportedCellValue($data[3] ?? '')) === 'guru' ? 'teacher' : 'student',
+                        'email' => $emailValue !== '' ? $emailValue : null,
+                        'phone' => $phoneValue !== '' ? $phoneValue : null
                     ];
 
                     if(empty($u['identity_number']) || empty($u['name']) || empty($u['kelas'])) {
@@ -953,7 +1982,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             
-            fclose($handle);
             
             $message = "✅ {$imported} pengguna berhasil diimport dari file.";
             if(!empty($errors)) {
@@ -961,30 +1989,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if(count($errors) > 3) $message .= " (dan " . (count($errors)-3) . " error lainnya)";
             }
             
-            echo json_encode(['success' => true, 'message' => $message, 'imported' => $imported, 'total' => $line - 2]);
+            echo json_encode([
+                'success' => true,
+                'message' => $message,
+                'imported' => $imported,
+                'total' => max(0, count($rows) - 1)
+            ]);
             exit;
         }
 
         // --- ASSET EXCEL/CSV OPERATIONS ---
 
         if ($action === 'export_assets_csv') {
-            $assets = $db->getAll('assets');
-            
-            // Prepare CSV content
-            $output = "Kategori,Merk,Model,Serial Number,Kode Barcode,Status\n";
-            
-            foreach($assets as $a) {
-                $kategori = '"' . str_replace('"', '""', $a['category'] ?? '') . '"';
-                $merk = '"' . str_replace('"', '""', $a['brand'] ?? '') . '"';
-                $model = '"' . str_replace('"', '""', $a['model'] ?? '') . '"';
-                $sn = '"' . str_replace('"', '""', $a['serial_number'] ?? '') . '"';
-                $barcode = '"' . str_replace('"', '""', $a['barcode'] ?? '') . '"';
-                $status = $a['status'] ?? 'available';
-                
-                $output .= "{$kategori},{$merk},{$model},{$sn},{$barcode},{$status}\n";
+            if (!AuthManager::isLoggedIn()) {
+                throw new Exception("❌ Akses ditolak! Anda harus login sebagai admin.");
             }
-            
-            // Send CSV file download
+
+            $assets = $db->getAll('assets');
+
+            $rows = [];
+            foreach ($assets as $a) {
+                $rows[] = [
+                    $a['category'] ?? '',
+                    $a['brand'] ?? '',
+                    $a['model'] ?? '',
+                    $a['serial_number'] ?? '',
+                    $a['barcode'] ?? '',
+                    $a['status'] ?? 'available'
+                ];
+            }
+
+            $output = buildCsvContent([
+                'Kategori Barang',
+                'Merek',
+                'Model',
+                'Serial Number',
+                'Barcode',
+                'Status Sistem (available/borrowed/maintenance)'
+            ], $rows);
+
             header('Content-Type: text/csv; charset=utf-8');
             header('Content-Disposition: attachment; filename="data_barang_' . date('Y-m-d_His') . '.csv"');
             echo $output;
@@ -992,42 +2035,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($action === 'import_assets_csv') {
+            if (!AuthManager::isLoggedIn()) {
+                throw new Exception("❌ Akses ditolak! Anda harus login sebagai admin.");
+            }
+
             if (!isset($_FILES['csvFile']) || $_FILES['csvFile']['error'] !== UPLOAD_ERR_OK) {
                 throw new Exception("File tidak terupload dengan benar!");
             }
 
-            $file = $_FILES['csvFile']['tmp_name'];
-            
-            // Validate file extension
             $filename = $_FILES['csvFile']['name'];
-            $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-            if(!in_array($ext, ['csv', 'xlsx', 'xls'])) {
-                throw new Exception("Format file harus CSV atau Excel (.csv, .xlsx, .xls)!");
+            $rows = parseImportSpreadsheetRows($_FILES['csvFile']['tmp_name'], $filename);
+            if (count($rows) < 2) {
+                throw new Exception("File impor barang kosong atau hanya berisi header.");
             }
 
-            // Parse CSV
             $imported = 0;
             $errors = [];
-            $handle = fopen($file, 'r');
-            $header = fgetcsv($handle); // Skip header row
-            
             $line = 1;
-            while(($data = fgetcsv($handle)) !== FALSE) {
+            foreach (array_slice($rows, 1) as $data) {
                 $line++;
-                if(count($data) < 4) continue; // Skip empty lines
+                if(count($data) < 4) continue;
                 
                 try {
+                    $serialNumber = normalizeImportedCellValue($data[3] ?? '');
+                    $barcodeValue = normalizeImportedCellValue($data[4] ?? '');
+                    $statusValue = strtolower(normalizeImportedCellValue($data[5] ?? ''));
                     $a = [
-                        'category' => trim($data[0]),
-                        'brand' => trim($data[1]),
-                        'model' => trim($data[2]),
-                        'serial_number' => trim($data[3]),
-                        'barcode' => isset($data[4]) && !empty(trim($data[4])) ? trim($data[4]) : trim($data[3]),
-                        'status' => isset($data[5]) && !empty(trim($data[5])) ? strtolower(trim($data[5])) : 'available'
+                        'category' => normalizeImportedCellValue($data[0] ?? ''),
+                        'brand' => normalizeImportedCellValue($data[1] ?? ''),
+                        'model' => normalizeImportedCellValue($data[2] ?? ''),
+                        'serial_number' => $serialNumber,
+                        'barcode' => $barcodeValue !== '' ? $barcodeValue : $serialNumber,
+                        'status' => $statusValue !== '' ? $statusValue : 'available'
                     ];
 
                     if(empty($a['category']) || empty($a['brand']) || empty($a['model']) || empty($a['serial_number'])) {
                         throw new Exception("Baris {$line}: Field Kategori, Merk, Model, dan Serial Number wajib diisi!");
+                    }
+
+                    if(!in_array($a['status'], ['available', 'borrowed', 'maintenance'], true)) {
+                        throw new Exception("Baris {$line}: Status harus available, borrowed, atau maintenance.");
                     }
 
                     if($db->findByColumn('assets', 'serial_number', $a['serial_number'])) {
@@ -1045,7 +2092,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             
-            fclose($handle);
             
             $message = "✅ {$imported} barang berhasil diimport dari file.";
             if(!empty($errors)) {
@@ -1053,10 +2099,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if(count($errors) > 3) $message .= " (dan " . (count($errors)-3) . " error lainnya)";
             }
             
-            echo json_encode(['success' => true, 'message' => $message, 'imported' => $imported, 'total' => $line - 2]);
+            echo json_encode([
+                'success' => true,
+                'message' => $message,
+                'imported' => $imported,
+                'total' => max(0, count($rows) - 1)
+            ]);
             exit;
         }
 
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        exit;
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+
+    try {
+        $action = $_GET['action'];
+
+        if ($action === 'get_running_text') {
+            $runningText = $db->getSetting('running_text', 'Selamat datang di Sistem Manajemen Aset Sekolah');
+            echo json_encode(['success' => true, 'running_text' => $runningText]);
+            exit;
+        }
+
+        if ($action === 'get_running_text_settings') {
+            $settings = [
+                'running_text' => $db->getSetting('running_text', 'Selamat datang di Sistem Manajemen Aset Sekolah'),
+                'animation_speed' => $db->getSetting('animation_speed', '20'),
+                'bg_color' => $db->getSetting('bg_color', '#667eea'),
+                'bg_color_end' => $db->getSetting('bg_color_end', '#764ba2'),
+                'text_color' => $db->getSetting('text_color', '#ffffff'),
+                'font_family' => $db->getSetting('font_family', 'Arial, sans-serif')
+            ];
+
+            echo json_encode(['success' => true, 'settings' => $settings]);
+            exit;
+        }
+
+        if ($action === 'get_all_settings') {
+            if (!AuthManager::isAdmin()) {
+                throw new Exception('❌ Akses ditolak!');
+            }
+
+            $settings = [
+                'running_text' => $db->getSetting('running_text', 'Selamat datang di Sistem Manajemen Aset Sekolah'),
+                'animation_speed' => $db->getSetting('animation_speed', '20'),
+                'bg_color' => $db->getSetting('bg_color', '#667eea'),
+                'bg_color_end' => $db->getSetting('bg_color_end', '#764ba2'),
+                'text_color' => $db->getSetting('text_color', '#ffffff'),
+                'font_family' => $db->getSetting('font_family', 'Arial, sans-serif'),
+                'admin_password_source' => AuthManager::getPasswordSource(),
+                'admin_password_updated_at' => $db->getSetting('admin_password_updated_at', ''),
+                'admin_has_recovery_code' => AuthManager::hasRecoveryCode(),
+                'admin_recovery_code_source' => AuthManager::getRecoveryCodeSource(),
+                'admin_recovery_code_updated_at' => $db->getSetting('admin_recovery_code_updated_at', '')
+            ];
+
+            echo json_encode(['success' => true, 'settings' => $settings]);
+            exit;
+        }
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'message' => $e->getMessage()]);
         exit;
@@ -1078,6 +2183,14 @@ if (in_array($view, $adminOnlyViews) && !AuthManager::isLoggedIn()) {
 $assets = $db->getAll('assets');
 $users = $db->getAll('users');
 $loans = $db->getLoansWithDetails();
+$xlsxImportEnabled = canImportXlsx();
+$importFormatLabel = $xlsxImportEnabled ? 'CSV / XLSX' : 'CSV';
+$importFormatAccept = $xlsxImportEnabled ? '.csv,.xlsx' : '.csv';
+$importFormatDescription = $xlsxImportEnabled ? 'CSV atau XLSX' : 'CSV';
+$importFormatExtensionText = $xlsxImportEnabled ? '(.csv, .xlsx)' : '(.csv)';
+$importTemplateHelperText = $xlsxImportEnabled
+    ? 'File template CSV bisa diedit di Excel lalu disimpan kembali sebagai CSV atau XLSX sebelum diimpor.'
+    : 'File template CSV bisa diedit di Excel lalu disimpan kembali sebagai CSV sebelum diimpor.';
 
 ?>
 <!DOCTYPE html>
@@ -1095,6 +2208,7 @@ $loans = $db->getLoansWithDetails();
     
     <!-- CSS Framework -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <meta name="csrf-token" content="<?= htmlspecialchars(getCsrfToken(), ENT_QUOTES, 'UTF-8') ?>">
     
     <style>
         :root {
@@ -1346,6 +2460,75 @@ $loans = $db->getLoansWithDetails();
         .page-header {
             margin-bottom: 2rem;
             padding-top: 1.5rem;
+        }
+        .guide-action-btn {
+            white-space: nowrap;
+        }
+        .guide-step-card {
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            padding: 1rem 1.1rem;
+            height: 100%;
+        }
+        .guide-step-number {
+            width: 32px;
+            height: 32px;
+            border-radius: 999px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.875rem;
+            font-weight: 700;
+            color: white;
+            background: linear-gradient(135deg, var(--primary-color) 0%, #60a5fa 100%);
+            flex-shrink: 0;
+        }
+        .guide-tip-box {
+            border-radius: 14px;
+            background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+            border: 1px solid #dbeafe;
+            padding: 1rem 1.1rem;
+        }
+        .settings-category-nav {
+            gap: 0.75rem;
+        }
+        .settings-category-btn {
+            border-radius: 16px;
+            border: 1px solid #dbe4f0;
+            background: #f8fafc;
+            color: #334155;
+            padding: 0.9rem 1.1rem;
+            text-align: left;
+            min-width: 240px;
+        }
+        .settings-category-btn.active {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            border-color: #1d4ed8;
+            color: #ffffff;
+            box-shadow: 0 12px 28px rgba(37, 99, 235, 0.24);
+        }
+        .settings-category-btn.active .text-muted,
+        .settings-category-btn.active .fw-bold,
+        .settings-category-btn.active i {
+            color: #ffffff !important;
+        }
+        .settings-panel-card {
+            border-radius: 18px;
+            border: 1px solid #e2e8f0;
+        }
+        .settings-panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        @media (max-width: 768px) {
+            .settings-category-btn {
+                width: 100%;
+                min-width: 0;
+            }
         }
         .asset-item {
             display: flex;
@@ -1753,6 +2936,51 @@ $loans = $db->getLoansWithDetails();
 
 <!-- LOAD ALL FUNCTION DEFINITIONS FIRST -->
 <script>
+    const APP_CONFIG = Object.freeze({
+        csrfToken: <?= json_encode(getCsrfToken(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>,
+        debug: <?= $appDebug ? 'true' : 'false' ?>
+    });
+
+    (function secureHttpClients() {
+        const csrfToken = APP_CONFIG.csrfToken;
+        const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
+        const nativeFetch = window.fetch.bind(window);
+
+        window.fetch = function(input, init = {}) {
+            const request = input instanceof Request ? input : null;
+            const requestMethod = request ? request.method : 'GET';
+            const requestHeaders = request ? request.headers : undefined;
+            const method = String(init.method || requestMethod || 'GET').toUpperCase();
+
+            if (!safeMethods.has(method)) {
+                const headers = new Headers(init.headers || requestHeaders || {});
+                headers.set('X-CSRF-Token', csrfToken);
+                init = {
+                    ...init,
+                    headers,
+                    credentials: init.credentials || 'same-origin'
+                };
+            }
+
+            return nativeFetch(input, init);
+        };
+
+        const nativeOpen = XMLHttpRequest.prototype.open;
+        const nativeSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function(method) {
+            this._csrfMethod = String(method || 'GET').toUpperCase();
+            return nativeOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function(body) {
+            if (!safeMethods.has(this._csrfMethod || 'GET')) {
+                this.setRequestHeader('X-CSRF-Token', csrfToken);
+            }
+            return nativeSend.call(this, body);
+        };
+    })();
+
     // --- NOTIFICATION SYSTEM ---
     function showNotification(title, message, type = 'info', duration = 5000) {
         const container = document.getElementById('notificationContainer');
@@ -2018,9 +3246,13 @@ $loans = $db->getLoansWithDetails();
                     <i class="fas fa-user-shield me-2"></i>
                     <span class="small">Administrator</span>
                 </div>
-                <a href="?action=logout" class="btn btn-outline-light btn-sm px-3 rounded-pill">
-                    <i class="fas fa-sign-out-alt me-1"></i> Logout
-                </a>
+                <form method="POST" action="" class="mb-0">
+                    <input type="hidden" name="action" value="traditional_logout">
+                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(getCsrfToken(), ENT_QUOTES, 'UTF-8') ?>">
+                    <button type="submit" class="btn btn-outline-light btn-sm px-3 rounded-pill">
+                        <i class="fas fa-sign-out-alt me-1"></i> Logout
+                    </button>
+                </form>
             </div>
         </div>
     </div>
@@ -2064,6 +3296,7 @@ $loans = $db->getLoansWithDetails();
 
                 <form method="POST" action="">
                     <input type="hidden" name="action" value="traditional_login">
+                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(getCsrfToken(), ENT_QUOTES, 'UTF-8') ?>">
                     <div class="mb-3">
                         <label class="form-label fw-500">Password Admin</label>
                         <div class="input-group">
@@ -2071,7 +3304,7 @@ $loans = $db->getLoansWithDetails();
                             <input type="password" class="form-control border-start-0 ps-0" name="password" placeholder="Masukkan password admin" required autofocus>
                         </div>
                         <small class="text-muted d-block mt-2">
-                            <i class="fas fa-info-circle me-1"></i> Password default: <code>admin123</code>
+                            <i class="fas fa-shield-alt me-1"></i> Gunakan password admin yang diberikan oleh pengelola sistem.
                         </small>
                         <?php if (isset($_SESSION['login_error'])): ?>
                         <div class="alert alert-danger mt-2 mb-0 py-2 px-3">
@@ -2086,10 +3319,64 @@ $loans = $db->getLoansWithDetails();
                     </button>
                 </form>
 
+                <div class="text-center mt-3">
+                    <button type="button" class="btn btn-link text-decoration-none p-0" data-bs-toggle="modal" data-bs-target="#forgotPasswordModal">
+                        <i class="fas fa-life-ring me-1"></i> Lupa password?
+                    </button>
+                </div>
+
                 <div class="mt-4 pt-3 border-top">
                     <a href="?view=dashboard" class="btn btn-outline-secondary btn-sm w-100">
                         <i class="fas fa-arrow-left me-1"></i> Kembali ke Public Mode
                     </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="forgotPasswordModal" tabindex="-1" aria-labelledby="forgotPasswordModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow">
+                <div class="modal-header border-0 pb-0">
+                    <div>
+                        <h5 class="modal-title fw-bold" id="forgotPasswordModalLabel">
+                            <i class="fas fa-key text-primary me-2"></i>Reset Password Admin
+                        </h5>
+                        <p class="text-muted text-sm mb-0 mt-1">Gunakan kode pemulihan untuk membuat password admin baru.</p>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body pt-3">
+                    <?php if (AuthManager::hasRecoveryCode()): ?>
+                    <form id="forgotPasswordForm">
+                        <div class="mb-3">
+                            <label class="form-label fw-500">Kode Pemulihan</label>
+                            <input type="text" class="form-control" id="forgotRecoveryCode" placeholder="Masukkan kode pemulihan" required>
+                            <small class="text-muted d-block mt-2">Kode ini diatur oleh admin dari menu Pengaturan atau dari konfigurasi hosting.</small>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-500">Password Baru</label>
+                            <input type="password" class="form-control" id="forgotNewPassword" placeholder="Minimal 8 karakter" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-500">Konfirmasi Password Baru</label>
+                            <input type="password" class="form-control" id="forgotConfirmPassword" placeholder="Ulangi password baru" required>
+                        </div>
+                        <div id="forgotPasswordAlert" class="alert d-none mb-0"></div>
+                    </form>
+                    <?php else: ?>
+                    <div class="alert alert-warning mb-0">
+                        <i class="fas fa-exclamation-triangle me-2"></i>Fitur lupa password belum aktif karena kode pemulihan belum dikonfigurasi. Login sebagai admin lalu buka menu <strong>Pengaturan</strong> untuk mengaktifkannya.
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <div class="modal-footer border-0 pt-0">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4" data-bs-dismiss="modal">Tutup</button>
+                    <?php if (AuthManager::hasRecoveryCode()): ?>
+                    <button type="button" class="btn btn-primary rounded-pill px-4" id="forgotPasswordSubmitBtn">
+                        <i class="fas fa-rotate-right me-2"></i>Reset Password
+                    </button>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -2099,9 +3386,16 @@ $loans = $db->getLoansWithDetails();
     
     <?php if (!AuthManager::isLoggedIn()): ?>
     <!-- PUBLIC MODE HEADER -->
-    <div class="page-header pt-3 pb-2 mb-4 border-bottom">
-        <h4 class="fw-bold mb-1 text-dark"><i class="fas fa-th-large me-2 text-primary"></i>Dashboard Inventaris</h4>
-        <p class="text-muted text-sm mb-0">Sistem Peminjaman & Pengembalian Aset Sekolah</p>
+    <div class="page-header d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 pt-3 pb-2 mb-4 border-bottom">
+        <div>
+            <h4 class="fw-bold mb-1 text-dark"><i class="fas fa-th-large me-2 text-primary"></i>Dashboard Inventaris</h4>
+            <p class="text-muted text-sm mb-0">Sistem Peminjaman & Pengembalian Aset Sekolah</p>
+        </div>
+        <div class="d-flex justify-content-md-end">
+            <button type="button" class="btn btn-outline-primary rounded-pill px-4 guide-action-btn" data-bs-toggle="modal" data-bs-target="#userGuideModal">
+                <i class="fas fa-circle-info me-2"></i>Cara Pakai Aplikasi
+            </button>
+        </div>
     </div>
     <?php else: ?>
     <!-- ADMIN MODE HEADER -->
@@ -2338,6 +3632,82 @@ $loans = $db->getLoansWithDetails();
                                 </tbody>
                             </table>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- User Guide Modal -->
+        <div class="modal fade" id="userGuideModal" tabindex="-1" aria-labelledby="userGuideModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+                <div class="modal-content border-0 shadow">
+                    <div class="modal-header bg-primary bg-opacity-10 border-0">
+                        <div>
+                            <h5 class="modal-title fw-bold" id="userGuideModalLabel">
+                                <i class="fas fa-book-open text-primary me-2"></i>Cara Pakai Aplikasi
+                            </h5>
+                            <p class="text-muted text-sm mb-0 mt-1">Panduan singkat untuk user saat meminjam dan mengembalikan barang.</p>
+                        </div>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body pt-2">
+                        <div class="guide-tip-box mb-3">
+                            <div class="fw-bold text-dark mb-2"><i class="fas fa-clipboard-check text-primary me-2"></i>Sebelum Mulai</div>
+                            <div class="text-muted text-sm mb-0">
+                                Siapkan <strong>NISN / NIP</strong> dan <strong>barcode barang</strong>. Pastikan barang yang akan dipinjam berstatus <strong>Ready</strong> di daftar stok.
+                            </div>
+                        </div>
+
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <div class="guide-step-card">
+                                    <div class="d-flex align-items-center gap-2 mb-3">
+                                        <span class="guide-step-number">1</span>
+                                        <h6 class="fw-bold mb-0 text-primary">Cara Meminjam Barang</h6>
+                                    </div>
+                                    <ol class="ps-3 mb-0 text-muted text-sm">
+                                        <li class="mb-2">Pastikan tab <strong>Peminjaman Barang</strong> sedang aktif.</li>
+                                        <li class="mb-2">Masukkan atau scan <strong>NISN / NIP</strong> pada kolom identitas peminjam.</li>
+                                        <li class="mb-2">Scan <strong>barcode barang</strong> pada kolom barcode.</li>
+                                        <li class="mb-2">Periksa kembali data yang dimasukkan.</li>
+                                        <li>Klik <strong>Konfirmasi Peminjaman</strong> lalu tunggu notifikasi berhasil.</li>
+                                    </ol>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="guide-step-card">
+                                    <div class="d-flex align-items-center gap-2 mb-3">
+                                        <span class="guide-step-number">2</span>
+                                        <h6 class="fw-bold mb-0 text-success">Cara Mengembalikan Barang</h6>
+                                    </div>
+                                    <ol class="ps-3 mb-0 text-muted text-sm">
+                                        <li class="mb-2">Pilih tab <strong>Pengembalian Barang</strong>.</li>
+                                        <li class="mb-2">Masukkan atau scan <strong>NISN / NIP</strong> peminjam.</li>
+                                        <li class="mb-2">Scan <strong>barcode barang</strong> yang akan dikembalikan.</li>
+                                        <li class="mb-2">Pilih kondisi barang sesuai keadaan sebenarnya.</li>
+                                        <li>Klik tombol konfirmasi pengembalian dan pastikan muncul notifikasi berhasil.</li>
+                                    </ol>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="guide-step-card">
+                            <div class="d-flex align-items-center gap-2 mb-3">
+                                <span class="guide-step-number">3</span>
+                                <h6 class="fw-bold mb-0 text-dark">Tips Penggunaan</h6>
+                            </div>
+                            <ul class="mb-0 ps-3 text-muted text-sm">
+                                <li class="mb-2">Jika muncul pesan gagal, cek kembali apakah identitas user dan barcode sudah benar.</li>
+                                <li class="mb-2">Barang yang sedang dipinjam tidak bisa dipinjam ulang sebelum dikembalikan.</li>
+                                <li class="mb-2">Jika barcode sulit dibaca scanner, ketik manual sesuai kode yang tertera pada label barang.</li>
+                                <li>Untuk bantuan lebih lanjut, hubungi admin yang bertugas.</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="modal-footer border-0 pt-0">
+                        <button type="button" class="btn btn-primary rounded-pill px-4" data-bs-dismiss="modal">
+                            <i class="fas fa-check me-2"></i>Mengerti
+                        </button>
                     </div>
                 </div>
             </div>
@@ -2659,13 +4029,13 @@ $loans = $db->getLoansWithDetails();
             <button onclick="showAssetsResume()" class="btn btn-outline-primary btn-sm" title="Lihat ringkasan fitur dan cara pakai">
                 <i class="fas fa-book me-1"></i> Resume
             </button>
-            <button onclick="exportAssetsCsv()" class="btn btn-info btn-sm" title="Export data barang ke file Excel">
-                <i class="fas fa-file-excel me-1"></i> Export Excel
+            <button onclick="exportAssetsCsv()" class="btn btn-info btn-sm" title="Export data barang ke file CSV">
+                <i class="fas fa-file-excel me-1"></i> Export CSV
             </button>
-            <button onclick="openAssetImportModal()" class="btn btn-warning btn-sm" title="Import data barang dari file Excel">
-                <i class="fas fa-file-csv me-1"></i> Import Excel
+            <button onclick="openAssetImportModal()" class="btn btn-warning btn-sm" title="Import data barang dari file <?= htmlspecialchars($importFormatDescription, ENT_QUOTES, 'UTF-8') ?>">
+                <i class="fas fa-file-csv me-1"></i> Import <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?>
             </button>
-            <button onclick="downloadAssetTemplate()" class="btn btn-secondary btn-sm" title="Download template Excel">
+            <button onclick="downloadAssetTemplate()" class="btn btn-secondary btn-sm" title="Download template CSV">
                 <i class="fas fa-download me-1"></i> Template
             </button>
             <button onclick="openAssetModal()" class="btn btn-primary btn-sm"><i class="fas fa-plus me-1"></i> Tambah Barang</button>
@@ -2806,31 +4176,31 @@ $loans = $db->getLoansWithDetails();
                     <!-- Fitur Import/Export -->
                     <div class="mb-4">
                         <h6 class="fw-bold text-success mb-3">
-                            <i class="fas fa-exchange-alt me-2"></i>Import & Export Excel
+                            <i class="fas fa-exchange-alt me-2"></i>Import & Export Data
                         </h6>
                         <div class="list-group list-group-flush">
                             <div class="list-group-item border-0 pb-3">
-                                <div class="fw-bold text-dark">📥 Export Excel</div>
-                                <p class="text-muted text-sm mb-2">Download semua data barang ke file CSV yang bisa dibuka di Excel. Format sesuai dengan kolom tabel:</p>
+                                <div class="fw-bold text-dark">Export CSV</div>
+                                <p class="text-muted text-sm mb-2">Download semua data barang ke file CSV berstruktur yang bisa langsung dibuka di Excel atau Google Sheets.</p>
                                 <div class="alert alert-info alert-sm mb-0">
                                     <strong>Kolom Export (urutan):</strong><br>
-                                    1. Kategori | 2. Merk | 3. Model | 4. Serial Number | 5. Kode Barcode | 6. Status
+                                    1. Kategori Barang | 2. Merek | 3. Model | 4. Serial Number | 5. Barcode | 6. Status Sistem
                                 </div>
                             </div>
                             <div class="list-group-item border-0 pb-3">
-                                <div class="fw-bold text-dark">📤 Import Excel</div>
-                                <p class="text-muted text-sm mb-2">Upload file CSV/Excel untuk menambahkan banyak barang sekaligus. Harus sesuai format export.</p>
+                                <div class="fw-bold text-dark">Import <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?></div>
+                                <p class="text-muted text-sm mb-2">Upload file <?= htmlspecialchars($importFormatDescription, ENT_QUOTES, 'UTF-8') ?> untuk menambahkan banyak barang sekaligus. Struktur kolom harus mengikuti template/export terbaru.</p>
                                 <div class="alert alert-warning alert-sm mb-0">
-                                    <strong>⚠️ Ketentuan Impor:</strong><br>
-                                    ✓ Kategori, Merk, Model, Serial Number = WAJIB<br>
-                                    ✓ Kode Barcode, Status = OPSIONAL<br>
-                                    ✓ Serial Number HARUS unik (tidak boleh duplikat)<br>
-                                    ✓ Status default: "available" jika kosong
+                                    <strong>Ketentuan Impor:</strong><br>
+                                    Kategori, Merek, Model, Serial Number = WAJIB<br>
+                                    Barcode, Status = OPSIONAL<br>
+                                    Serial Number HARUS unik (tidak boleh duplikat)<br>
+                                    Status hanya boleh: available, borrowed, atau maintenance
                                 </div>
                             </div>
                             <div class="list-group-item border-0 pb-3">
-                                <div class="fw-bold text-dark">📋 Template Excel</div>
-                                <p class="text-muted text-sm mb-0">Klik tombol "Template" untuk download file template Excel contoh dengan data sample. Edit kolom sesuai data barang Anda, lalu upload untuk import massal.</p>
+                                <div class="fw-bold text-dark">Template CSV</div>
+                                <p class="text-muted text-sm mb-0"><?= htmlspecialchars($importTemplateHelperText, ENT_QUOTES, 'UTF-8') ?></p>
                             </div>
                         </div>
                     </div>
@@ -2873,7 +4243,7 @@ $loans = $db->getLoansWithDetails();
                         <ul class="text-sm text-muted">
                             <li class="mb-2">🎯 <strong>Kategori Wajib:</strong> Laptop, Komputer, Printer, Scanner, Proyektor, Monitor, Tablet, Smartphone, Aksesoris, Perangkat Jaringan, atau Lainnya</li>
                             <li class="mb-2">🔖 <strong>Serial Number Unik:</strong> Gunakan format yang mudah dikenali, misal: LNV-001, EPS-001, CAN-002</li>
-                            <li class="mb-2">📊 <strong>Bulk Import:</strong> Untuk 50+ barang, gunakan fitur Import Excel daripada manual satu per satu</li>
+                            <li class="mb-2">📊 <strong>Bulk Import:</strong> Untuk 50+ barang, gunakan fitur import <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?> daripada input manual satu per satu</li>
                             <li class="mb-2">🖨️ <strong>Barcode Printing:</strong> Download dan cetak barcode untuk ditempel pada barang fisik</li>
                             <li class="mb-2">🔒 <strong>Proteksi Data:</strong> Barang dengan riwayat peminjaman tidak bisa dihapus</li>
                         </ul>
@@ -2893,14 +4263,14 @@ $loans = $db->getLoansWithDetails();
                 <div class="modal-header bg-warning bg-opacity-10">
                     <h5 class="modal-title">
                         <i class="fas fa-file-csv text-warning me-2"></i>
-                        Import Data Barang dari Excel
+                        Import Data Barang dari <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?>
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
                     <div class="mb-4">
-                        <h6 class="fw-bold text-dark mb-3"><i class="fas fa-list me-2 text-warning"></i>Struktur Tabel Excel</h6>
-                        <p class="text-sm text-muted mb-3">File Excel harus memiliki kolom dengan urutan berikut (sesuai dengan tabel):</p>
+                        <h6 class="fw-bold text-dark mb-3"><i class="fas fa-list me-2 text-warning"></i>Struktur Tabel File</h6>
+                        <p class="text-sm text-muted mb-3">File <?= htmlspecialchars($importFormatDescription, ENT_QUOTES, 'UTF-8') ?> harus memiliki kolom dengan urutan berikut:</p>
                         <div class="table-responsive">
                             <table class="table table-sm table-bordered bg-light">
                                 <thead class="table-warning">
@@ -2914,13 +4284,13 @@ $loans = $db->getLoansWithDetails();
                                 <tbody>
                                     <tr>
                                         <td class="fw-bold">1</td>
-                                        <td><code>Kategori</code></td>
+                                        <td><code>Kategori Barang</code></td>
                                         <td><span class="badge bg-danger">Wajib</span></td>
                                         <td>Jenis aset: Laptop, Printer, Monitor, Proyektor, dll</td>
                                     </tr>
                                     <tr>
                                         <td class="fw-bold">2</td>
-                                        <td><code>Merk</code></td>
+                                        <td><code>Merek</code></td>
                                         <td><span class="badge bg-danger">Wajib</span></td>
                                         <td>Brand barang: Lenovo, Canon, Dell, Epson, dll</td>
                                     </tr>
@@ -2938,7 +4308,7 @@ $loans = $db->getLoansWithDetails();
                                     </tr>
                                     <tr>
                                         <td class="fw-bold">5</td>
-                                        <td><code>Kode Barcode</code></td>
+                                        <td><code>Barcode</code></td>
                                         <td><span class="badge bg-info">Opsional</span></td>
                                         <td>Kode untuk barcode (jika kosong, gunakan Serial Number)</td>
                                     </tr>
@@ -2952,14 +4322,20 @@ $loans = $db->getLoansWithDetails();
                             </table>
                         </div>
                     </div>
+
+                    <?php if (!$xlsxImportEnabled): ?>
+                    <div class="alert alert-warning mb-4">
+                        <i class="fas fa-circle-info me-2"></i>Import XLSX belum aktif di server ini karena ekstensi <code>ZipArchive</code> belum tersedia. Gunakan file CSV untuk saat ini.
+                    </div>
+                    <?php endif; ?>
                     
                     <hr>
                     
                     <div class="mb-4">
-                        <h6 class="fw-bold text-dark mb-3"><i class="fas fa-file-excel me-2 text-success"></i>Contoh Data Excel</h6>
+                        <h6 class="fw-bold text-dark mb-3"><i class="fas fa-file-excel me-2 text-success"></i>Contoh Data <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?></h6>
                         <div class="alert alert-light border">
                             <code class="text-xs d-block" style="line-height: 1.8;">
-                                Kategori,Merk,Model,Serial Number,Kode Barcode,Status<br>
+                                Kategori Barang,Merek,Model,Serial Number,Barcode,Status Sistem (available/borrowed/maintenance)<br>
                                 <span class="text-success">Laptop,Lenovo,ThinkPad X1,LNV-001,LNV-001,available</span><br>
                                 <span class="text-success">Printer,Canon,G2010,CAN-001,CAN-001,available</span><br>
                                 <span class="text-success">Proyektor,Epson,EB-X05,EPS-001,EPS-001,available</span><br>
@@ -2967,16 +4343,16 @@ $loans = $db->getLoansWithDetails();
                                 <span class="text-success">Tablet,Apple,iPad Pro,APP-001,APP-001,</span>
                             </code>
                         </div>
-                        <small class="text-muted"><i class="fas fa-info-circle me-1"></i>Catatan: Kolom Kode Barcode dan Status boleh kosong akan diisi dengan nilai default</small>
+                        <small class="text-muted"><i class="fas fa-info-circle me-1"></i>Catatan: Kolom Barcode dan Status boleh kosong. Jika kosong, barcode mengikuti serial number dan status menjadi <code>available</code>.</small>
                     </div>
                     
                     <hr>
                     
                     <div class="mb-3">
                         <label class="form-label fw-bold"><i class="fas fa-upload me-2 text-warning"></i>Pilih File untuk Diupload</label>
-                        <input type="file" id="assetImportFile" class="form-control" accept=".csv,.xlsx,.xls" required>
+                        <input type="file" id="assetImportFile" class="form-control" accept="<?= htmlspecialchars($importFormatAccept, ENT_QUOTES, 'UTF-8') ?>" required>
                         <small class="text-muted d-block mt-2">
-                            Format: CSV, XLSX, atau XLS (Max: 5MB)
+                            Format yang didukung: <?= htmlspecialchars($importFormatDescription, ENT_QUOTES, 'UTF-8') ?> (Max: 5MB)
                         </small>
                     </div>
                 </div>
@@ -3113,6 +4489,82 @@ $loans = $db->getLoansWithDetails();
         </div>
     </div>
 
+    <!-- User Guide Modal -->
+    <div class="modal fade" id="userGuideModal" tabindex="-1" aria-labelledby="userGuideModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content border-0 shadow">
+                <div class="modal-header bg-primary bg-opacity-10 border-0">
+                    <div>
+                        <h5 class="modal-title fw-bold" id="userGuideModalLabel">
+                            <i class="fas fa-book-open text-primary me-2"></i>Cara Pakai Aplikasi
+                        </h5>
+                        <p class="text-muted text-sm mb-0 mt-1">Panduan singkat untuk user saat meminjam dan mengembalikan barang.</p>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body pt-2">
+                    <div class="guide-tip-box mb-3">
+                        <div class="fw-bold text-dark mb-2"><i class="fas fa-clipboard-check text-primary me-2"></i>Sebelum Mulai</div>
+                        <div class="text-muted text-sm mb-0">
+                            Siapkan <strong>NISN / NIP</strong> dan <strong>barcode barang</strong>. Pastikan barang yang akan dipinjam berstatus <strong>Ready</strong> di daftar stok.
+                        </div>
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <div class="guide-step-card">
+                                <div class="d-flex align-items-center gap-2 mb-3">
+                                    <span class="guide-step-number">1</span>
+                                    <h6 class="fw-bold mb-0 text-primary">Cara Meminjam Barang</h6>
+                                </div>
+                                <ol class="ps-3 mb-0 text-muted text-sm">
+                                    <li class="mb-2">Pastikan tab <strong>Peminjaman Barang</strong> sedang aktif.</li>
+                                    <li class="mb-2">Masukkan atau scan <strong>NISN / NIP</strong> pada kolom identitas peminjam.</li>
+                                    <li class="mb-2">Scan <strong>barcode barang</strong> pada kolom barcode.</li>
+                                    <li class="mb-2">Periksa kembali data yang dimasukkan.</li>
+                                    <li>Klik <strong>Konfirmasi Peminjaman</strong> lalu tunggu notifikasi berhasil.</li>
+                                </ol>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="guide-step-card">
+                                <div class="d-flex align-items-center gap-2 mb-3">
+                                    <span class="guide-step-number">2</span>
+                                    <h6 class="fw-bold mb-0 text-success">Cara Mengembalikan Barang</h6>
+                                </div>
+                                <ol class="ps-3 mb-0 text-muted text-sm">
+                                    <li class="mb-2">Pilih tab <strong>Pengembalian Barang</strong>.</li>
+                                    <li class="mb-2">Masukkan atau scan <strong>NISN / NIP</strong> peminjam.</li>
+                                    <li class="mb-2">Scan <strong>barcode barang</strong> yang akan dikembalikan.</li>
+                                    <li class="mb-2">Pilih kondisi barang sesuai keadaan sebenarnya.</li>
+                                    <li>Klik tombol konfirmasi pengembalian dan pastikan muncul notifikasi berhasil.</li>
+                                </ol>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="guide-step-card">
+                        <div class="d-flex align-items-center gap-2 mb-3">
+                            <span class="guide-step-number">3</span>
+                            <h6 class="fw-bold mb-0 text-dark">Tips Penggunaan</h6>
+                        </div>
+                        <ul class="mb-0 ps-3 text-muted text-sm">
+                            <li class="mb-2">Jika muncul pesan gagal, cek kembali apakah identitas user dan barcode sudah benar.</li>
+                            <li class="mb-2">Barang yang sedang dipinjam tidak bisa dipinjam ulang sebelum dikembalikan.</li>
+                            <li class="mb-2">Jika barcode sulit dibaca scanner, ketik manual sesuai kode yang tertera pada label barang.</li>
+                            <li>Untuk bantuan lebih lanjut, hubungi admin yang bertugas.</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="modal-footer border-0 pt-0">
+                    <button type="button" class="btn btn-primary rounded-pill px-4" data-bs-dismiss="modal">
+                        <i class="fas fa-check me-2"></i>Mengerti
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <?php elseif ($view == 'users'): ?>
 
     <div style="height: calc(100vh - 70px); display: flex; flex-direction: column; overflow: hidden; padding: 1rem;">
@@ -3123,11 +4575,11 @@ $loans = $db->getLoansWithDetails();
             <p class="text-muted text-sm mb-0">Daftar Guru dan Siswa yang terdaftar dalam sistem.</p>
         </div>
         <div class="d-flex gap-2">
-            <button onclick="exportToExcel()" class="btn btn-info btn-sm" title="Export data ke file Excel">
-                <i class="fas fa-file-excel me-1"></i> Export Excel
+            <button onclick="exportToExcel()" class="btn btn-info btn-sm" title="Export data ke file CSV">
+                <i class="fas fa-file-excel me-1"></i> Export CSV
             </button>
-            <button onclick="openImportExcelModal()" class="btn btn-warning btn-sm" title="Import data dari file Excel">
-                <i class="fas fa-file-csv me-1"></i> Import Excel
+            <button onclick="openImportExcelModal()" class="btn btn-warning btn-sm" title="Import data dari file <?= htmlspecialchars($importFormatDescription, ENT_QUOTES, 'UTF-8') ?>">
+                <i class="fas fa-file-csv me-1"></i> Import <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?>
             </button>
             <button onclick="openBulkImportModal()" class="btn btn-success btn-sm" title="Import multiple users">
                 <i class="fas fa-file-import me-1"></i> Import Bulk
@@ -3350,28 +4802,34 @@ $loans = $db->getLoansWithDetails();
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-file-excel me-2"></i>Import Data Pengguna dari Excel</h5>
+                    <h5 class="modal-title"><i class="fas fa-file-excel me-2"></i>Import Data Pengguna dari <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?></h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
                     <div class="alert alert-info mb-3">
-                        <strong>Format File:</strong> CSV atau Excel (.csv, .xlsx, .xls)<br>
+                        <strong>Format File:</strong> <?= htmlspecialchars($importFormatDescription, ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars($importFormatExtensionText, ENT_QUOTES, 'UTF-8') ?><br>
                         <strong>Struktur Kolom:</strong><br>
-                        <code>ID (NISN/NIP) | Nama Lengkap | Kelas | Status | Email | No. Telepon</code><br>
-                        <small class="text-muted">Kolom Email dan No. Telepon bersifat opsional. Status: Guru atau Pelajar</small>
+                        <code>Nomor Identitas (NISN/NIP) | Nama Lengkap | Kelas / Unit | Peran Pengguna (Guru/Pelajar) | Email | No. Telepon</code><br>
+                        <small class="text-muted">Kolom Email dan No. Telepon bersifat opsional. Peran diisi Guru atau Pelajar.</small>
                     </div>
+
+                    <?php if (!$xlsxImportEnabled): ?>
+                    <div class="alert alert-warning mb-3">
+                        <i class="fas fa-circle-info me-2"></i>Import XLSX belum aktif di server ini karena ekstensi <code>ZipArchive</code> belum tersedia. Gunakan file CSV untuk saat ini.
+                    </div>
+                    <?php endif; ?>
 
                     <div class="d-grid gap-2 mb-3">
                         <button type="button" class="btn btn-outline-secondary btn-sm" onclick="downloadExcelTemplate()">
-                            <i class="fas fa-download me-2"></i> Download Template Excel
+                            <i class="fas fa-download me-2"></i> Download Template CSV
                         </button>
                     </div>
 
                     <form id="importExcelForm">
                         <div class="mb-3">
-                            <label class="form-label">Pilih File Excel/CSV</label>
-                            <input type="file" class="form-control" id="excelFile" accept=".csv,.xlsx,.xls" required>
-                            <small class="text-muted d-block mt-2">Max 5MB • Format: CSV, XLSX, atau XLS</small>
+                            <label class="form-label">Pilih File <?= htmlspecialchars($importFormatLabel, ENT_QUOTES, 'UTF-8') ?></label>
+                            <input type="file" class="form-control" id="excelFile" accept="<?= htmlspecialchars($importFormatAccept, ENT_QUOTES, 'UTF-8') ?>" required>
+                            <small class="text-muted d-block mt-2">Max 5MB - Format: <?= htmlspecialchars($importFormatDescription, ENT_QUOTES, 'UTF-8') ?></small>
                         </div>
                     </form>
 
@@ -3398,7 +4856,7 @@ $loans = $db->getLoansWithDetails();
         </div>
         <div class="d-flex gap-2">
             <?php if (AuthManager::isLoggedIn()): ?>
-                <button onclick="clearAllLogs()" class="btn btn-outline-danger btn-sm" title="Hapus semua log">
+                <button type="button" class="btn btn-outline-danger btn-sm" title="Hapus semua log" data-bs-toggle="modal" data-bs-target="#clearLogsModal">
                     <i class="fas fa-trash me-1"></i> Hapus Semua Log
                 </button>
             <?php else: ?>
@@ -3409,6 +4867,51 @@ $loans = $db->getLoansWithDetails();
             <button onclick="location.reload()" class="btn btn-outline-secondary btn-sm"><i class="fas fa-sync-alt me-1"></i> Refresh</button>
         </div>
     </div>
+
+    <?php if (AuthManager::isLoggedIn()): ?>
+    <div class="modal fade" id="clearLogsModal" tabindex="-1" aria-labelledby="clearLogsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow">
+                <div class="modal-header border-0 pb-0">
+                    <div>
+                        <h5 class="modal-title fw-bold" id="clearLogsModalLabel">
+                            <i class="fas fa-shield-alt text-danger me-2"></i>Konfirmasi Hapus Semua Log
+                        </h5>
+                        <p class="text-muted text-sm mb-0 mt-1">Masukkan kode pemulihan untuk mengonfirmasi penghapusan seluruh log aktivitas.</p>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body pt-3">
+                    <?php if (AuthManager::hasRecoveryCode()): ?>
+                    <div class="alert alert-warning">
+                        <i class="fas fa-triangle-exclamation me-2"></i>Aksi ini permanen dan tidak bisa dibatalkan.
+                    </div>
+                    <form id="clearLogsForm">
+                        <div class="mb-3">
+                            <label class="form-label fw-500">Kode Pemulihan</label>
+                            <input type="text" class="form-control" id="clearLogsRecoveryCode" placeholder="Masukkan kode pemulihan admin" required>
+                            <small class="text-muted d-block mt-2">Recovery code diatur dari menu Pengaturan > Keamanan Admin.</small>
+                        </div>
+                        <div id="clearLogsAlert" class="alert d-none mb-0"></div>
+                    </form>
+                    <?php else: ?>
+                    <div class="alert alert-warning mb-0">
+                        <i class="fas fa-exclamation-circle me-2"></i>Penghapusan log dikunci sampai kode pemulihan diatur terlebih dahulu di menu <strong>Pengaturan &gt; Keamanan Admin</strong>.
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <div class="modal-footer border-0 pt-0">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4" data-bs-dismiss="modal">Batal</button>
+                    <?php if (AuthManager::hasRecoveryCode()): ?>
+                    <button type="button" class="btn btn-danger rounded-pill px-4" id="clearLogsSubmitBtn" onclick="submitClearLogs()">
+                        <i class="fas fa-trash me-2"></i>Hapus Semua Log
+                    </button>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <!-- Filter Card -->
     <div class="card border-0 shadow-sm mb-3 flex-shrink-0">
@@ -3485,9 +4988,25 @@ $loans = $db->getLoansWithDetails();
                     </thead>
                     <tbody>
                         <?php 
-                        $logs = $activityLog->getAll();
-                        if(empty($logs)): 
-                        ?>
+                        $logs = [];
+                        $logLoadError = null;
+
+                        try {
+                            $logs = $activityLog->getAll();
+                        } catch (Throwable $e) {
+                            $logLoadError = 'Log aktivitas sementara belum bisa dimuat. Silakan refresh halaman atau cek konfigurasi database.';
+                            error_log('Log activity load failed: ' . $e->getMessage());
+                        }
+
+                        if ($logLoadError): ?>
+                            <tr>
+                                <td colspan="5" class="text-center py-5 text-muted">
+                                    <i class="fas fa-triangle-exclamation fa-2x mb-3 text-warning"></i>
+                                    <p class="mb-2 fw-semibold text-dark">Log aktivitas gagal dimuat</p>
+                                    <p class="mb-0 small"><?= htmlspecialchars($logLoadError, ENT_QUOTES, 'UTF-8') ?></p>
+                                </td>
+                            </tr>
+                        <?php elseif (empty($logs)): ?>
                             <tr>
                                 <td colspan="5" class="text-center py-5 text-muted">
                                     <i class="fas fa-inbox fa-2x mb-3 text-light-emphasis"></i>
@@ -3645,100 +5164,198 @@ $loans = $db->getLoansWithDetails();
     <div class="page-header d-flex justify-content-between align-items-center mb-3 flex-shrink-0">
         <div>
             <h4 class="fw-bold mb-1"><i class="fas fa-cog me-2"></i>Pengaturan Sistem</h4>
-            <p class="text-muted text-sm mb-0">Atur konfigurasi running text dan pengaturan lainnya.</p>
+            <p class="text-muted text-sm mb-0">Pilih kategori pengaturan agar konfigurasi tampilan dan keamanan admin lebih rapi.</p>
         </div>
     </div>
 
-    <!-- Running Text Settings -->
     <div class="card border-0 shadow-sm flex-grow-1" style="min-height: 0; max-height: 100%; overflow-y: auto;">
         <div class="card-body">
-            <h6 class="fw-bold mb-4"><i class="fas fa-scroll me-2 text-primary"></i>Pengaturan Running Text</h6>
-            
-            <form id="runningTextForm">
-                <!-- Text Content -->
-                <div class="row mb-4">
-                    <div class="col-12">
-                        <label class="form-label fw-500">Teks yang Ditampilkan</label>
-                        <textarea class="form-control" id="runningTextInput" placeholder="Masukkan teks running text..." rows="3" required></textarea>
-                        <small class="text-muted d-block mt-2">Teks ini akan menampilkan animasi bergerak (scrolling) di bagian bawah dashboard peminjam.</small>
-                    </div>
-                </div>
+            <div class="nav nav-pills settings-category-nav flex-column flex-md-row mb-4" id="settingsCategoryTabs" role="tablist">
+                <button class="nav-link settings-category-btn active" id="running-text-tab" data-bs-toggle="pill" data-bs-target="#settingsRunningTextPane" type="button" role="tab" aria-controls="settingsRunningTextPane" aria-selected="true">
+                    <div class="fw-bold mb-1"><i class="fas fa-scroll me-2 text-primary"></i>Running Text</div>
+                    <div class="text-muted text-sm">Atur teks berjalan, warna, font, dan preview tampilan dashboard.</div>
+                </button>
+                <button class="nav-link settings-category-btn" id="security-admin-tab" data-bs-toggle="pill" data-bs-target="#settingsSecurityPane" type="button" role="tab" aria-controls="settingsSecurityPane" aria-selected="false">
+                    <div class="fw-bold mb-1"><i class="fas fa-user-shield me-2 text-danger"></i>Keamanan Admin</div>
+                    <div class="text-muted text-sm">Kelola password login admin dan kode pemulihan saat lupa password.</div>
+                </button>
+            </div>
 
-                <!-- Animation Speed -->
-                <div class="row mb-4">
-                    <div class="col-md-6">
-                        <label class="form-label fw-500">Kecepatan Animasi (detik)</label>
-                        <div class="input-group">
-                            <input type="range" class="form-range" id="animationSpeed" min="5" max="60" value="20">
-                            <input type="number" class="form-control" id="animationSpeedValue" value="20" min="5" max="60" style="width: 80px; margin-left: 10px;">
+            <div class="tab-content" id="settingsCategoryTabContent">
+                <div class="tab-pane fade show active" id="settingsRunningTextPane" role="tabpanel" aria-labelledby="running-text-tab" tabindex="0">
+                    <div class="card settings-panel-card shadow-sm mb-3">
+                        <div class="card-body">
+                            <div class="settings-panel-header">
+                                <div>
+                                    <h6 class="fw-bold mb-1"><i class="fas fa-scroll me-2 text-primary"></i>Pengaturan Running Text</h6>
+                                    <p class="text-muted text-sm mb-0">Sesuaikan teks informasi yang muncul di bagian bawah dashboard publik.</p>
+                                </div>
+                                <span class="badge text-bg-light border">Kategori Tampilan</span>
+                            </div>
+                            
+                            <form id="runningTextForm">
+                                <div class="row mb-4">
+                                    <div class="col-12">
+                                        <label class="form-label fw-500">Teks yang Ditampilkan</label>
+                                        <textarea class="form-control" id="runningTextInput" placeholder="Masukkan teks running text..." rows="3" required></textarea>
+                                        <small class="text-muted d-block mt-2">Teks ini akan menampilkan animasi bergerak (scrolling) di bagian bawah dashboard peminjam.</small>
+                                    </div>
+                                </div>
+
+                                <div class="row mb-4">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-500">Kecepatan Animasi (detik)</label>
+                                        <div class="input-group">
+                                            <input type="range" class="form-range" id="animationSpeed" min="5" max="60" value="20">
+                                            <input type="number" class="form-control" id="animationSpeedValue" value="20" min="5" max="60" style="width: 80px; margin-left: 10px;">
+                                        </div>
+                                        <small class="text-muted">Lebih kecil = lebih cepat, Lebih besar = lebih lambat</small>
+                                    </div>
+                                </div>
+
+                                <div class="row mb-4">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-500">Warna Background (Start)</label>
+                                        <div class="input-group">
+                                            <input type="color" class="form-control form-control-color" id="bgColor" value="#667eea" style="width: 60px; padding: 8px;">
+                                            <input type="text" class="form-control" id="bgColorText" value="#667eea" placeholder="#667eea" readonly>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-500">Warna Background (End)</label>
+                                        <div class="input-group">
+                                            <input type="color" class="form-control form-control-color" id="bgColorEnd" value="#764ba2" style="width: 60px; padding: 8px;">
+                                            <input type="text" class="form-control" id="bgColorEndText" value="#764ba2" placeholder="#764ba2" readonly>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="row mb-4">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-500">Warna Teks</label>
+                                        <div class="input-group">
+                                            <input type="color" class="form-control form-control-color" id="textColor" value="#ffffff" style="width: 60px; padding: 8px;">
+                                            <input type="text" class="form-control" id="textColorText" value="#ffffff" placeholder="#ffffff" readonly>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-500">Jenis Font</label>
+                                        <select class="form-select" id="fontFamily">
+                                            <option value="Arial, sans-serif">Arial</option>
+                                            <option value="'Segoe UI', Tahoma, sans-serif">Segoe UI</option>
+                                            <option value="'Times New Roman', serif">Times New Roman</option>
+                                            <option value="'Courier New', monospace">Courier New</option>
+                                            <option value="Georgia, serif">Georgia</option>
+                                            <option value="Trebuchet, sans-serif">Trebuchet</option>
+                                            <option value="Verdana, sans-serif">Verdana</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="d-flex gap-2 mb-4">
+                                    <button type="submit" class="btn btn-primary">
+                                        <i class="fas fa-save me-2"></i> Simpan Perubahan
+                                    </button>
+                                    <button type="button" class="btn btn-outline-secondary" onclick="loadCurrentRunningText()">
+                                        <i class="fas fa-redo me-2"></i> Muat Ulang
+                                    </button>
+                                </div>
+
+                                <div id="runningTextAlert" class="mt-3" style="display: none;"></div>
+                            </form>
                         </div>
-                        <small class="text-muted">Lebih kecil = lebih cepat, Lebih besar = lebih lambat</small>
                     </div>
-                </div>
 
-                <!-- Colors Section -->
-                <div class="row mb-4">
-                    <div class="col-md-6">
-                        <label class="form-label fw-500">Warna Background (Start)</label>
-                        <div class="input-group">
-                            <input type="color" class="form-control form-control-color" id="bgColor" value="#667eea" style="width: 60px; padding: 8px;">
-                            <input type="text" class="form-control" id="bgColorText" value="#667eea" placeholder="#667eea" readonly>
+                    <div class="card settings-panel-card shadow-sm">
+                        <div class="card-body">
+                            <div class="settings-panel-header">
+                                <div>
+                                    <h6 class="fw-bold mb-1"><i class="fas fa-eye me-2 text-info"></i>Preview Running Text</h6>
+                                    <p class="text-muted text-sm mb-0">Lihat hasil perubahan sebelum dipakai di dashboard publik.</p>
+                                </div>
+                                <span class="badge text-bg-light border">Live Preview</span>
+                            </div>
+                            <div class="alert alert-info mb-0">
+                                <p class="mb-3"><strong>Running Text Preview:</strong></p>
+                                <div id="settingsRunningTextPreview" class="running-text-container p-3" style="position: static; margin-bottom: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                                    <div class="running-text" style="animation: scroll-left 20s linear infinite; color: white; font-family: Arial, sans-serif;">
+                                        Teks preview - ini adalah contoh animasi
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <div class="col-md-6">
-                        <label class="form-label fw-500">Warna Background (End)</label>
-                        <div class="input-group">
-                            <input type="color" class="form-control form-control-color" id="bgColorEnd" value="#764ba2" style="width: 60px; padding: 8px;">
-                            <input type="text" class="form-control" id="bgColorEndText" value="#764ba2" placeholder="#764ba2" readonly>
+                </div>
+
+                <div class="tab-pane fade" id="settingsSecurityPane" role="tabpanel" aria-labelledby="security-admin-tab" tabindex="0">
+                    <div class="row g-4">
+                        <div class="col-lg-6">
+                            <div class="card settings-panel-card shadow-sm h-100">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+                                        <div>
+                                            <h6 class="fw-bold mb-1">Ubah Password Admin</h6>
+                                            <p class="text-muted text-sm mb-0">Password baru akan dipakai untuk login berikutnya.</p>
+                                        </div>
+                                        <span class="badge text-bg-light border" id="adminPasswordSourceBadge">Sumber: env</span>
+                                    </div>
+
+                                    <form id="adminPasswordForm">
+                                        <div class="mb-3">
+                                            <label class="form-label fw-500">Password Saat Ini</label>
+                                            <input type="password" class="form-control" id="currentAdminPassword" placeholder="Masukkan password saat ini" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label fw-500">Password Baru</label>
+                                            <input type="password" class="form-control" id="newAdminPassword" placeholder="Minimal 8 karakter" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label fw-500">Konfirmasi Password Baru</label>
+                                            <input type="password" class="form-control" id="confirmAdminPassword" placeholder="Ulangi password baru" required>
+                                        </div>
+                                        <div class="text-muted text-sm mb-3" id="adminPasswordUpdatedInfo">Belum pernah diperbarui dari aplikasi.</div>
+                                        <div id="adminPasswordAlert" class="alert d-none mb-3"></div>
+                                        <button type="submit" class="btn btn-danger">
+                                            <i class="fas fa-key me-2"></i>Simpan Password Baru
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                </div>
 
-                <!-- Text Color and Font -->
-                <div class="row mb-4">
-                    <div class="col-md-6">
-                        <label class="form-label fw-500">Warna Teks</label>
-                        <div class="input-group">
-                            <input type="color" class="form-control form-control-color" id="textColor" value="#ffffff" style="width: 60px; padding: 8px;">
-                            <input type="text" class="form-control" id="textColorText" value="#ffffff" placeholder="#ffffff" readonly>
+                        <div class="col-lg-6">
+                            <div class="card settings-panel-card shadow-sm h-100">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+                                        <div>
+                                            <h6 class="fw-bold mb-1">Kode Pemulihan</h6>
+                                            <p class="text-muted text-sm mb-0">Kode ini dipakai saat admin lupa password login.</p>
+                                        </div>
+                                        <span class="badge text-bg-light border" id="adminRecoverySourceBadge">Status recovery</span>
+                                    </div>
+
+                                    <form id="adminRecoveryCodeForm">
+                                        <div class="mb-3">
+                                            <label class="form-label fw-500">Password Saat Ini</label>
+                                            <input type="password" class="form-control" id="recoveryCurrentPassword" placeholder="Masukkan password saat ini" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label fw-500">Kode Pemulihan Baru</label>
+                                            <input type="text" class="form-control" id="adminRecoveryCode" placeholder="Minimal 6 karakter" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label fw-500">Konfirmasi Kode Pemulihan</label>
+                                            <input type="text" class="form-control" id="confirmAdminRecoveryCode" placeholder="Ulangi kode pemulihan" required>
+                                        </div>
+                                        <div class="text-muted text-sm mb-3" id="adminRecoveryUpdatedInfo">Belum ada kode pemulihan aktif.</div>
+                                        <div id="adminRecoveryAlert" class="alert d-none mb-3"></div>
+                                        <button type="submit" class="btn btn-outline-primary">
+                                            <i class="fas fa-shield-heart me-2"></i>Simpan Kode Pemulihan
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label fw-500">Jenis Font</label>
-                        <select class="form-select" id="fontFamily">
-                            <option value="Arial, sans-serif">Arial</option>
-                            <option value="'Segoe UI', Tahoma, sans-serif">Segoe UI</option>
-                            <option value="'Times New Roman', serif">Times New Roman</option>
-                            <option value="'Courier New', monospace">Courier New</option>
-                            <option value="Georgia, serif">Georgia</option>
-                            <option value="Trebuchet, sans-serif">Trebuchet</option>
-                            <option value="Verdana, sans-serif">Verdana</option>
-                        </select>
-                    </div>
-                </div>
-
-                <!-- Buttons -->
-                <div class="d-flex gap-2 mb-4">
-                    <button type="submit" class="btn btn-primary">
-                        <i class="fas fa-save me-2"></i> Simpan Perubahan
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary" onclick="loadCurrentRunningText()">
-                        <i class="fas fa-redo me-2"></i> Muat Ulang
-                    </button>
-                </div>
-
-                <div id="runningTextAlert" class="mt-3" style="display: none;"></div>
-            </form>
-
-            <hr class="my-4">
-
-            <!-- Preview Section -->
-            <h6 class="fw-bold mb-3"><i class="fas fa-eye me-2 text-info"></i>Preview</h6>
-            <div class="alert alert-info mb-0">
-                <p class="mb-3"><strong>Running Text Preview:</strong></p>
-                <div id="settingsRunningTextPreview" class="running-text-container p-3" style="position: static; margin-bottom: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                    <div class="running-text" style="animation: scroll-left 20s linear infinite; color: white; font-family: Arial, sans-serif;">
-                        Teks preview - ini adalah contoh animasi
                     </div>
                 </div>
             </div>
@@ -4273,8 +5890,7 @@ if (returnForm) {
             loadingBtn.disabled = true;
             loadingBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i> Export...';
             
-            // Trigger CSV download
-            window.location.href = '?action=export_users_csv';
+            submitDownloadForm('export_users_csv');
             
             setTimeout(() => {
                 loadingBtn.disabled = false;
@@ -4295,16 +5911,33 @@ if (returnForm) {
 
     function downloadExcelTemplate() {
         // Create sample CSV
-        const template = `ID (NISN/NIP),Nama Lengkap,Kelas,Status,Email,No. Telepon
+        const template = `Nomor Identitas (NISN/NIP),Nama Lengkap,Kelas / Unit,Peran Pengguna (Guru/Pelajar),Email,No. Telepon
 2024001,Ahmad Dani,10 PPLG 1,Pelajar,ahmad@school.com,08123456789
 2024002,Budi Santoso,10 PPLG 1,Pelajar,budi@school.com,08112345678
 19800101,Pak Budi,-,Guru,pakbudi@school.com,08111111111`;
 
-        const blob = new Blob([template], { type: 'text/csv;charset=utf-8;' });
+        const blob = new Blob(['\uFEFF' + template], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         link.download = `template_pengguna_${new Date().getTime()}.csv`;
         link.click();
+    }
+
+    function submitDownloadForm(action) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = `?action=${encodeURIComponent(action)}`;
+        form.style.display = 'none';
+
+        const csrfInput = document.createElement('input');
+        csrfInput.type = 'hidden';
+        csrfInput.name = 'csrf_token';
+        csrfInput.value = APP_CONFIG.csrfToken;
+        form.appendChild(csrfInput);
+
+        document.body.appendChild(form);
+        form.submit();
+        document.body.removeChild(form);
     }
 
     document.getElementById('excelFile')?.addEventListener('change', function(e) {
@@ -4384,7 +6017,7 @@ if (returnForm) {
 
     function exportAssetsCsv() {
         try {
-            window.location.href = '?action=export_assets_csv';
+            submitDownloadForm('export_assets_csv');
         } catch(e) {
             alert("Gagal export: " + e.message);
         }
@@ -4397,7 +6030,7 @@ if (returnForm) {
     }
 
     function downloadAssetTemplate() {
-        const csvContent = "Kategori,Merk,Model,Serial Number,Kode Barcode,Status\n" +
+        const csvContent = "Kategori Barang,Merek,Model,Serial Number,Barcode,Status Sistem (available/borrowed/maintenance)\n" +
             "Laptop,Lenovo,ThinkPad X1,LNV-001,LNV-001,available\n" +
             "Laptop,Dell,Inspiron 15,DEL-001,DEL-001,available\n" +
             "Printer,Canon,G2010,CAN-001,CAN-001,available\n" +
@@ -4408,7 +6041,7 @@ if (returnForm) {
             "Aksesoris,Logitech,Wireless Mouse,LOG-001,LOG-001,available\n" +
             "Aksesoris,HP,USB Drive 32GB,HP-001,HP-001,available";
         
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         const url = URL.createObjectURL(blob);
         link.setAttribute('href', url);
@@ -4490,70 +6123,17 @@ if (returnForm) {
         }
     }
 
-    // --- AUTHENTICATION FUNCTIONS ---
-
-    function loginAdmin() {
-        var form = document.getElementById('loginForm');
-        var pass = document.getElementById('adminPassword').value.trim();
-        
-        if (!pass) {
-            alert('Masukkan password!');
-            return false;
-        }
-        
-        // Disable button
-        var btn = document.getElementById('loginButton');
-        var originalText = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i> Proses...';
-        
-        // Simple XMLHttpRequest - most reliable
-        var xhr = new XMLHttpRequest();
-        xhr.open('POST', '?action=login', true);
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        
-        xhr.onload = function() {
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-            
-            if (xhr.status === 200) {
-                try {
-                    var res = JSON.parse(xhr.responseText);
-                    if (res && res.success) {
-                        // Success - redirect to dashboard
-                        setTimeout(function() {
-                            window.location.href = '?view=dashboard';
-                        }, 100);
-                    } else {
-                        alert('Password salah: ' + (res.message || 'Unknown error'));
-                        document.getElementById('adminPassword').value = '';
-                        document.getElementById('adminPassword').focus();
-                    }
-                } catch(e) {
-                    alert('Error parsing response: ' + e.message);
-                }
-            } else {
-                alert('Login gagal. Status: ' + xhr.status);
-            }
-        };
-        
-        xhr.onerror = function() {
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-            alert('Network error. Cek koneksi internet.');
-        };
-        
-        xhr.send(JSON.stringify({password: pass}));
-        return false;
-    }
+    // --- LOGS FILTERING FUNCTIONS ---
 
     function testLoginAPI() {
+        alert('Debug login test dinonaktifkan pada build production.');
+        return;
         console.log('=== STARTING API TEST ===');
         const button = event.target;
         button.disabled = true;
         button.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i> Testing...';
         
-        const password = 'admin123';
+        const password = '';
         console.log('Testing with default password...');
         
         fetch('?action=login', {
@@ -5182,9 +6762,71 @@ if (returnForm) {
                     
                     // Update preview
                     updateRunningTextPreview();
+                    updateAdminSecurityStatus(data.settings);
                 }
             })
             .catch(e => console.error('Load error:', e));
+    }
+
+    function formatSecurityTimestamp(value, emptyText) {
+        if (!value) {
+            return emptyText;
+        }
+
+        const normalized = value.replace(' ', 'T');
+        const parsedDate = new Date(normalized);
+        if (Number.isNaN(parsedDate.getTime())) {
+            return `Terakhir diperbarui: ${value}`;
+        }
+
+        return `Terakhir diperbarui: ${parsedDate.toLocaleString('id-ID')}`;
+    }
+
+    function updateAdminSecurityStatus(settings = {}) {
+        const passwordSourceBadge = document.getElementById('adminPasswordSourceBadge');
+        const passwordUpdatedInfo = document.getElementById('adminPasswordUpdatedInfo');
+        const recoverySourceBadge = document.getElementById('adminRecoverySourceBadge');
+        const recoveryUpdatedInfo = document.getElementById('adminRecoveryUpdatedInfo');
+
+        if (passwordSourceBadge) {
+            const passwordSource = settings.admin_password_source === 'app' ? 'Aplikasi' : 'ENV';
+            passwordSourceBadge.textContent = `Sumber: ${passwordSource}`;
+        }
+
+        if (passwordUpdatedInfo) {
+            passwordUpdatedInfo.textContent = formatSecurityTimestamp(
+                settings.admin_password_updated_at || '',
+                'Belum pernah diperbarui dari aplikasi.'
+            );
+        }
+
+        if (recoverySourceBadge) {
+            if (settings.admin_has_recovery_code) {
+                const recoverySource = settings.admin_recovery_code_source === 'app' ? 'Recovery aktif di aplikasi' : 'Recovery aktif dari ENV';
+                recoverySourceBadge.textContent = recoverySource;
+            } else {
+                recoverySourceBadge.textContent = 'Recovery belum aktif';
+            }
+        }
+
+        if (recoveryUpdatedInfo) {
+            recoveryUpdatedInfo.textContent = settings.admin_has_recovery_code
+                ? formatSecurityTimestamp(
+                    settings.admin_recovery_code_updated_at || '',
+                    settings.admin_recovery_code_source === 'env'
+                        ? 'Recovery code aktif dari ENV hosting.'
+                        : 'Recovery code aktif.'
+                )
+                : 'Belum ada kode pemulihan aktif.';
+        }
+    }
+
+    function setInlineAlert(element, type, message) {
+        if (!element) return;
+
+        element.className = `alert alert-${type}`;
+        element.textContent = message;
+        element.classList.remove('d-none');
     }
 
     function updateRunningTextPreview() {
@@ -5306,8 +6948,220 @@ if (returnForm) {
             }
         });
     }
+
+    const adminPasswordForm = document.getElementById('adminPasswordForm');
+    if (adminPasswordForm) {
+        adminPasswordForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const alertBox = document.getElementById('adminPasswordAlert');
+            const btn = adminPasswordForm.querySelector('button[type="submit"]');
+            const originalText = btn.innerHTML;
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Menyimpan...';
+            alertBox.classList.add('d-none');
+
+            try {
+                const res = await fetch('?action=change_admin_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        current_password: document.getElementById('currentAdminPassword').value,
+                        new_password: document.getElementById('newAdminPassword').value,
+                        confirm_password: document.getElementById('confirmAdminPassword').value
+                    })
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    setInlineAlert(alertBox, 'success', data.message);
+                    adminPasswordForm.reset();
+                    loadCurrentRunningText();
+                    showNotification('✓ Password Admin Tersimpan', data.message, 'success', 3000);
+                } else {
+                    setInlineAlert(alertBox, 'danger', data.message || 'Gagal memperbarui password admin.');
+                }
+            } catch (err) {
+                setInlineAlert(alertBox, 'danger', err.message || 'Terjadi kesalahan saat memperbarui password admin.');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
+        });
+    }
+
+    const adminRecoveryCodeForm = document.getElementById('adminRecoveryCodeForm');
+    if (adminRecoveryCodeForm) {
+        adminRecoveryCodeForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const alertBox = document.getElementById('adminRecoveryAlert');
+            const btn = adminRecoveryCodeForm.querySelector('button[type="submit"]');
+            const originalText = btn.innerHTML;
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Menyimpan...';
+            alertBox.classList.add('d-none');
+
+            try {
+                const res = await fetch('?action=update_admin_recovery_code', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        current_password: document.getElementById('recoveryCurrentPassword').value,
+                        recovery_code: document.getElementById('adminRecoveryCode').value,
+                        confirm_recovery_code: document.getElementById('confirmAdminRecoveryCode').value
+                    })
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    setInlineAlert(alertBox, 'success', data.message);
+                    adminRecoveryCodeForm.reset();
+                    loadCurrentRunningText();
+                    showNotification('✓ Recovery Code Tersimpan', data.message, 'success', 3000);
+                } else {
+                    setInlineAlert(alertBox, 'danger', data.message || 'Gagal memperbarui kode pemulihan.');
+                }
+            } catch (err) {
+                setInlineAlert(alertBox, 'danger', err.message || 'Terjadi kesalahan saat memperbarui kode pemulihan.');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
+        });
+    }
+
+    const forgotPasswordSubmitBtn = document.getElementById('forgotPasswordSubmitBtn');
+    if (forgotPasswordSubmitBtn) {
+        forgotPasswordSubmitBtn.addEventListener('click', async function() {
+            const form = document.getElementById('forgotPasswordForm');
+            const alertBox = document.getElementById('forgotPasswordAlert');
+            const originalText = forgotPasswordSubmitBtn.innerHTML;
+
+            if (!form) {
+                return;
+            }
+
+            forgotPasswordSubmitBtn.disabled = true;
+            forgotPasswordSubmitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Memproses...';
+            alertBox.classList.add('d-none');
+
+            try {
+                const res = await fetch('?action=forgot_admin_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        recovery_code: document.getElementById('forgotRecoveryCode').value,
+                        new_password: document.getElementById('forgotNewPassword').value,
+                        confirm_password: document.getElementById('forgotConfirmPassword').value
+                    })
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    setInlineAlert(alertBox, 'success', data.message);
+                    form.reset();
+                    showNotification('✓ Password Berhasil Direset', data.message, 'success', 4000);
+
+                    if (window.bootstrap) {
+                        const modalElement = document.getElementById('forgotPasswordModal');
+                        const modalInstance = window.bootstrap.Modal.getInstance(modalElement);
+                        setTimeout(() => {
+                            if (modalInstance) {
+                                modalInstance.hide();
+                            }
+                        }, 1200);
+                    }
+                } else {
+                    setInlineAlert(alertBox, 'danger', data.message || 'Reset password gagal.');
+                }
+            } catch (err) {
+                setInlineAlert(alertBox, 'danger', err.message || 'Terjadi kesalahan saat reset password.');
+            } finally {
+                forgotPasswordSubmitBtn.disabled = false;
+                forgotPasswordSubmitBtn.innerHTML = originalText;
+            }
+        });
+    }
     
     // Login Form Handler removed - using traditional form submit
+    function submitClearLogs() {
+        const recoveryInput = document.getElementById('clearLogsRecoveryCode');
+        const alertBox = document.getElementById('clearLogsAlert');
+        const submitBtn = document.getElementById('clearLogsSubmitBtn');
+        const modalElement = document.getElementById('clearLogsModal');
+        const recoveryCode = recoveryInput?.value?.trim() || '';
+
+        if (!recoveryInput || !submitBtn) {
+            alert('âš ï¸ Form keamanan penghapusan log tidak tersedia.');
+            return;
+        }
+
+        if (!recoveryCode) {
+            if (typeof setInlineAlert === 'function') {
+                setInlineAlert(alertBox, 'danger', 'Kode pemulihan wajib diisi.');
+            }
+            recoveryInput.focus();
+            return;
+        }
+
+        const originalText = submitBtn.innerHTML;
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Memverifikasi...';
+        if (alertBox) {
+            alertBox.classList.add('d-none');
+        }
+
+        fetch('?action=clear_logs', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ recovery_code: recoveryCode })
+        })
+        .then(async res => {
+            const data = await res.json();
+            return { ok: res.ok, data };
+        })
+        .then(({ ok, data }) => {
+            if (ok && data.success) {
+                if (typeof setInlineAlert === 'function') {
+                    setInlineAlert(alertBox, 'success', data.message);
+                }
+
+                const successAlert = document.createElement('div');
+                successAlert.className = 'alert alert-success alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3';
+                successAlert.style.zIndex = '9999';
+                successAlert.style.minWidth = '420px';
+                successAlert.innerHTML = `
+                    <i class="fas fa-check-circle me-2"></i> <strong>${data.message}</strong>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                `;
+                document.body.appendChild(successAlert);
+
+                if (window.bootstrap && modalElement) {
+                    const modalInstance = window.bootstrap.Modal.getInstance(modalElement);
+                    if (modalInstance) {
+                        modalInstance.hide();
+                    }
+                }
+
+                setTimeout(() => location.reload(), 1200);
+            } else if (typeof setInlineAlert === 'function') {
+                setInlineAlert(alertBox, 'danger', data.message || 'Gagal menghapus semua log.');
+            }
+        })
+        .catch(e => {
+            if (typeof setInlineAlert === 'function') {
+                setInlineAlert(alertBox, 'danger', 'Terjadi kesalahan sistem: ' + e.message);
+            }
+        })
+        .finally(() => {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalText;
+        });
+    }
+
 </script>
 </body>
 </html>

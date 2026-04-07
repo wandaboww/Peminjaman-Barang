@@ -10,6 +10,7 @@ A fully functional **2-flow school asset inventory management system** with:
 
 ### Public Mode (Students & Teachers)
 - Clean, professional dashboard
+- User guide button with instructional modal
 - Asset borrowing interface (with automatic due-date calculation)
 - Asset return/check-in interface
 - Role-based borrowing limits (3 days for teachers, 1 day for students)
@@ -110,9 +111,19 @@ Data Layer (JSON Files)
 - Responsive layout (mobile-friendly)
 - Color-coded status indicators
 - Clear navigation
+- Public dashboard guide modal for end users
 - User-friendly error messages
 - Loading states and button feedback
 - Dual mode navbar (public vs admin)
+
+#### 6. User Guidance Feature
+- Public mode includes a **"Cara Pakai Aplikasi"** button in the dashboard header
+- Clicking the button opens a Bootstrap modal without leaving the page
+- The modal explains:
+  - borrowing steps
+  - return steps
+  - quick usage tips for barcode and identity input
+- Designed to help students/teachers use the kiosk-style interface independently
 
 ---
 

@@ -1,60 +1,132 @@
 <!DOCTYPE html>
-<html>
+<html lang="id">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Test CRUD Tambah Barang</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: #f3f6fb;
+        }
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.4rem 0.75rem;
+            border-radius: 999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+        .status-chip.ok {
+            background: #dcfce7;
+            color: #166534;
+        }
+        .status-chip.warn {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .status-chip.err {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        pre {
+            max-height: 420px;
+            overflow-y: auto;
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 12px;
+            padding: 1rem;
+            margin-bottom: 0;
+        }
+    </style>
 </head>
-<body class="p-5">
+<body class="py-4">
     <div class="container">
-        <h1>Test CRUD Tambah Barang</h1>
-        
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>Test Add Asset</h5>
+        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
+            <div>
+                <h1 class="h3 fw-bold mb-1">Test CRUD Tambah Barang</h1>
+                <p class="text-muted mb-0">Tester ini sudah disesuaikan dengan login admin dan CSRF aplikasi.</p>
+            </div>
+            <div id="sessionStatus" class="status-chip warn">Belum login admin</div>
+        </div>
+
+        <div class="row g-4">
+            <div class="col-lg-5">
+                <div class="card border-0 shadow-sm mb-4">
+                    <div class="card-header bg-white py-3">
+                        <h2 class="h5 mb-0">1. Koneksi & Login</h2>
                     </div>
                     <div class="card-body">
                         <div class="mb-3">
-                            <label>Brand</label>
+                            <label for="baseUrl" class="form-label">Base URL aplikasi</label>
+                            <input type="url" id="baseUrl" class="form-control" value="http://127.0.0.1:8000/">
+                            <div class="form-text">Gunakan root aplikasi, bukan `test-crud.html?action=...`.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="adminPassword" class="form-label">Password Admin</label>
+                            <input type="password" id="adminPassword" class="form-control" value="admin123">
+                        </div>
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-primary" id="loginBtn" onclick="loginAdminForTest()">
+                                Login Admin untuk Test
+                            </button>
+                            <button class="btn btn-outline-secondary" onclick="checkSession()">
+                                Cek Session
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm">
+                    <div class="card-header bg-white py-3">
+                        <h2 class="h5 mb-0">2. Test Add Asset</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="brand" class="form-label">Brand</label>
                             <input type="text" id="brand" class="form-control" value="Lenovo">
                         </div>
                         <div class="mb-3">
-                            <label>Model</label>
+                            <label for="model" class="form-label">Model</label>
                             <input type="text" id="model" class="form-control" value="ThinkPad E15">
                         </div>
                         <div class="mb-3">
-                            <label>Serial Number</label>
-                            <input type="text" id="sn" class="form-control" value="LNV-TEST-001">
+                            <label for="sn" class="form-label">Serial Number</label>
+                            <input type="text" id="sn" class="form-control" value="">
                         </div>
                         <div class="mb-3">
-                            <label>Category</label>
+                            <label for="category" class="form-label">Category</label>
                             <input type="text" id="category" class="form-control" value="Laptop">
                         </div>
                         <div class="mb-3">
-                            <label>Barcode</label>
+                            <label for="barcode" class="form-label">Barcode</label>
                             <input type="text" id="barcode" class="form-control" value="">
                         </div>
                         <div class="mb-3">
-                            <label>Status</label>
+                            <label for="status" class="form-label">Status</label>
                             <select id="status" class="form-select">
                                 <option value="available">Available</option>
                                 <option value="borrowed">Borrowed</option>
-                                <option value="broken">Broken</option>
+                                <option value="maintenance">Maintenance</option>
                             </select>
                         </div>
-                        <button class="btn btn-primary w-100" onclick="testAddAsset()">Test Add Asset</button>
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-success" onclick="testAddAsset()">Test Add Asset</button>
+                            <button class="btn btn-outline-secondary" onclick="fillRandomSerial()">Generate Serial Test</button>
+                        </div>
                     </div>
                 </div>
             </div>
-            
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>Response</h5>
+
+            <div class="col-lg-7">
+                <div class="card border-0 shadow-sm h-100">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                        <h2 class="h5 mb-0">Response</h2>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="clearResponse()">Clear</button>
                     </div>
                     <div class="card-body">
-                        <pre id="response" style="max-height: 400px; overflow-y: auto; background: #f5f5f5; padding: 10px; border-radius: 4px;">Tunggu response...</pre>
+                        <pre id="response">Tunggu response...</pre>
                     </div>
                 </div>
             </div>
@@ -62,49 +134,185 @@
     </div>
 
     <script>
+    const testState = {
+        csrfToken: '',
+        loggedIn: false
+    };
+
+    function normalizeBaseUrl() {
+        const input = document.getElementById('baseUrl').value.trim();
+        if (!input) {
+            throw new Error('Base URL wajib diisi.');
+        }
+        return input.endsWith('/') ? input : input + '/';
+    }
+
+    function buildActionUrl(action) {
+        return normalizeBaseUrl() + '?action=' + encodeURIComponent(action);
+    }
+
+    function setResponse(title, payload) {
+        const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+        document.getElementById('response').textContent = `${title}\n\n${text}`;
+    }
+
+    function setSessionStatus(label, type) {
+        const el = document.getElementById('sessionStatus');
+        el.className = `status-chip ${type}`;
+        el.textContent = label;
+    }
+
+    function extractCsrfToken(html) {
+        const match = html.match(/name="csrf_token"\s+value="([^"]+)"/i);
+        if (!match) {
+            throw new Error('CSRF token tidak ditemukan dari halaman login.');
+        }
+        return match[1];
+    }
+
+    async function bootstrapCsrfToken() {
+        const loginPageUrl = normalizeBaseUrl() + '?view=login';
+        const response = await fetch(loginPageUrl, {
+            credentials: 'include'
+        });
+
+        const html = await response.text();
+        testState.csrfToken = extractCsrfToken(html);
+        return testState.csrfToken;
+    }
+
+    async function loginAdminForTest() {
+        const password = document.getElementById('adminPassword').value;
+        if (!password) {
+            setResponse('Login gagal', 'Password admin wajib diisi.');
+            return;
+        }
+
+        try {
+            const csrfToken = await bootstrapCsrfToken();
+            const response = await fetch(buildActionUrl('login'), {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken
+                },
+                body: JSON.stringify({ password })
+            });
+
+            const data = await response.json();
+            testState.loggedIn = Boolean(data.success);
+            setSessionStatus(
+                data.success ? 'Login admin aktif' : 'Login admin gagal',
+                data.success ? 'ok' : 'err'
+            );
+            setResponse('Hasil login', {
+                url: buildActionUrl('login'),
+                csrfToken,
+                status: response.status,
+                body: data
+            });
+        } catch (error) {
+            testState.loggedIn = false;
+            setSessionStatus('Login admin gagal', 'err');
+            setResponse('Error login', error.message);
+        }
+    }
+
+    async function checkSession() {
+        try {
+            if (!testState.csrfToken) {
+                await bootstrapCsrfToken();
+            }
+
+            const response = await fetch(buildActionUrl('check_session'), {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': testState.csrfToken
+                },
+                body: JSON.stringify({})
+            });
+
+            const data = await response.json();
+            testState.loggedIn = Boolean(data.is_logged_in);
+            setSessionStatus(
+                data.is_logged_in ? 'Session admin aktif' : 'Belum login admin',
+                data.is_logged_in ? 'ok' : 'warn'
+            );
+            setResponse('Status session', data);
+        } catch (error) {
+            setResponse('Error cek session', error.message);
+        }
+    }
+
+    function fillRandomSerial() {
+        const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+        const serial = `LNV-TEST-${suffix}`;
+        document.getElementById('sn').value = serial;
+        document.getElementById('barcode').value = serial;
+    }
+
     async function testAddAsset() {
         const payload = {
-            brand: document.getElementById('brand').value,
-            model: document.getElementById('model').value,
-            serial_number: document.getElementById('sn').value,
-            category: document.getElementById('category').value,
-            barcode: document.getElementById('barcode').value,
+            brand: document.getElementById('brand').value.trim(),
+            model: document.getElementById('model').value.trim(),
+            serial_number: document.getElementById('sn').value.trim(),
+            category: document.getElementById('category').value.trim(),
+            barcode: document.getElementById('barcode').value.trim(),
             status: document.getElementById('status').value
         };
 
-        console.log('Sending payload:', payload);
-        
+        if (!payload.serial_number) {
+            setResponse('Validasi gagal', 'Serial number wajib diisi. Klik "Generate Serial Test" jika perlu.');
+            return;
+        }
+
+        if (!testState.csrfToken || !testState.loggedIn) {
+            setResponse('Session belum siap', 'Silakan klik "Login Admin untuk Test" terlebih dahulu.');
+            return;
+        }
+
         try {
-            const response = await fetch('?action=add_asset', {
+            const response = await fetch(buildActionUrl('add_asset'), {
                 method: 'POST',
+                credentials: 'include',
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': testState.csrfToken
                 },
                 body: JSON.stringify(payload)
             });
 
             const text = await response.text();
-            console.log('Raw response:', text);
-            
-            document.getElementById('response').textContent = `
-Status: ${response.status} ${response.statusText}
-Headers: ${JSON.stringify([...response.headers.entries()], null, 2)}
-
-Body:
-${text}
-`;
+            let parsedBody = text;
 
             try {
-                const data = JSON.parse(text);
-                console.log('Parsed JSON:', data);
-            } catch (e) {
-                console.error('Failed to parse JSON:', e);
+                parsedBody = JSON.parse(text);
+            } catch (error) {
+                parsedBody = {
+                    raw: text,
+                    parse_error: error.message
+                };
             }
-        } catch (e) {
-            console.error('Error:', e);
-            document.getElementById('response').textContent = 'Error: ' + e.message;
+
+            setResponse('Hasil add asset', {
+                url: buildActionUrl('add_asset'),
+                status: `${response.status} ${response.statusText}`,
+                payload,
+                body: parsedBody
+            });
+        } catch (error) {
+            setResponse('Error add asset', error.message);
         }
     }
+
+    function clearResponse() {
+        document.getElementById('response').textContent = 'Tunggu response...';
+    }
+
+    fillRandomSerial();
     </script>
 </body>
 </html>

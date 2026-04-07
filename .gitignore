@@ -22,6 +22,9 @@ database.json
 activity_logs.json
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 /storage/database/
 
 # ==========================================

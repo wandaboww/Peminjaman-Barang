@@ -8,6 +8,7 @@ Pick one based on your need:
 **Start with**: [GETTING_STARTED.md](GETTING_STARTED.md)
 - How to borrow items
 - How to return items
+- How to open the in-app user guide modal
 - How the system works
 - Common operations
 
@@ -52,6 +53,7 @@ Pick one based on your need:
 | [LOGIN_GUIDE.md](LOGIN_GUIDE.md) | Login help & API | 10 min | Admins |
 | [TEST_CHECKLIST.md](TEST_CHECKLIST.md) | All test scenarios | 30 min | Testers |
 | [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) | Technical overview | 20 min | Developers |
+| [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) | Production deployment checklist | 10 min | Developers / DevOps |
 
 ### Technical Documentation
 
@@ -176,6 +178,7 @@ Pick one based on your need:
 - [x] View available assets
 - [x] Borrow items (with automatic due date)
 - [x] Return items
+- [x] Open "Cara Pakai Aplikasi" modal from dashboard
 - [x] View borrowing history
 - [x] Check blacklist status
 - [x] Login to admin mode
